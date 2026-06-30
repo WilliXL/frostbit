@@ -128,8 +128,8 @@ impl<'a> FoldPlan<'a> {
         let mut shapes: Vec<Shape> = Vec::new();
         let (mut arity, mut base, mut max_depth) = (0u32, 0usize, 0usize);
         for child in children {
-            shapes.push(child_shape(&child));
-            let (net, depth) = splice(child, op, &mut steps);
+            let (shape, net, depth) = splice(child, op, &mut steps);
+            shapes.push(shape);
             max_depth = max_depth.max(base + depth);
             base += net as usize;
             arity += net;
@@ -145,11 +145,10 @@ impl<'a> FoldPlan<'a> {
 
     /// `lhs` minus `rhs` (never flattened — DIFF is not associative).
     fn diff(lhs: BitmapExpr<'a>, rhs: BitmapExpr<'a>) -> Self {
-        let shapes = [child_shape(&lhs), child_shape(&rhs)];
         let mut steps = Vec::new();
-        let (_, d0) = splice(lhs, Op::Diff, &mut steps); // Op::Diff never flattens
-        let (_, d1) = splice(rhs, Op::Diff, &mut steps);
-        let shape = shape::diff_shape(&shapes);
+        let (s0, _, d0) = splice(lhs, Op::Diff, &mut steps); // Op::Diff never flattens
+        let (s1, _, d1) = splice(rhs, Op::Diff, &mut steps);
+        let shape = shape::diff_shape(&[s0, s1]);
         steps.push(Step::Combine(2, shape::to_plan(PlanOp::Diff, &shape)));
         FoldPlan { steps, shape, max_depth: d0.max(1 + d1).max(2) }
     }
@@ -244,15 +243,6 @@ impl Drop for ExecStack {
     }
 }
 
-/// Output shape of a child, for the parent's bottom-up analysis.
-fn child_shape(child: &BitmapExpr<'_>) -> Shape {
-    match child {
-        BitmapExpr::Leaf(v) => view_shape(v),
-        BitmapExpr::Owned(b) => view_shape(&b.view()),
-        BitmapExpr::Combined(p) => p.shape.clone(),
-    }
-}
-
 /// A working operand on the execution stack: an un-evaluated leaf (still bytes)
 /// or a folded, pooled arena result chained directly into the next op.
 enum Acc<'a> {
@@ -281,19 +271,24 @@ impl Inputs for [Acc<'_>] {
     }
 }
 
-/// Append `child`'s steps to `steps`, flattening when it is a same-op sub-plan.
-/// Returns `(net operands contributed, peak stack depth during its steps)`.
-fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (u32, usize) {
+/// Append `child`'s steps to `steps`, flattening when it is a same-op sub-plan,
+/// and yield its output [`Shape`] for the parent's analysis (moved out of a
+/// sub-plan, never cloned). Returns `(shape, net operands contributed, peak
+/// stack depth during its steps)`.
+fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (Shape, u32, usize) {
     match child {
         BitmapExpr::Leaf(v) => {
+            let shape = view_shape(&v);
             steps.push(Step::Leaf(v));
-            (1, 1)
+            (shape, 1, 1)
         }
         BitmapExpr::Owned(b) => {
+            let shape = view_shape(&b.view());
             steps.push(Step::Owned(b));
-            (1, 1)
+            (shape, 1, 1)
         }
         BitmapExpr::Combined(mut fp) => {
+            let shape = std::mem::take(&mut fp.shape);
             let root = fp.steps.last().map(|s| match s {
                 Step::Combine(_, p) => p.op,
                 _ => unreachable!("a plan always ends in a Combine"),
@@ -305,10 +300,10 @@ fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (
             if flatten {
                 let Some(Step::Combine(k, _)) = fp.steps.pop() else { unreachable!() };
                 steps.append(&mut fp.steps);
-                (k, fp.max_depth)
+                (shape, k, fp.max_depth)
             } else {
                 steps.append(&mut fp.steps);
-                (1, fp.max_depth)
+                (shape, 1, fp.max_depth)
             }
         }
     }
