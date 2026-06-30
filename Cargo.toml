@@ -1,0 +1,25 @@
+[package]
+name = "frostbit"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Frozen, mmap-friendly, zero-copy roaring bitmaps with fast set operations."
+
+[dependencies]
+aligned-vec = "0.6"
+bytemuck = { version = "1", features = ["derive"] }
+roaring = { version = "0.11", optional = true }
+
+[features]
+default = ["roaring"]
+# Conversions to/from roaring::RoaringBitmap.
+roaring = ["dep:roaring"]
+# Exposes internal modules (byte/format helpers, arena, plan, …) for white-box
+# tests and benchmarks. NOT part of the stable public API — may change anytime.
+internals = []
+
+# Keep 10M-element round-trip tests fast under `cargo test`.
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 2
