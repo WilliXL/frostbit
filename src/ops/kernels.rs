@@ -155,16 +155,24 @@ fn union_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>])
         let (card, bytes) = run_fold(arena, i, &refs[0], &refs[1..], run::union);
         arena.record(key, CT_RUN, card, i, bytes);
     } else if needs_bitmap {
+        // Seed from a bitmap input (a single copy) rather than clearing then
+        // OR-ing it back in, then OR the rest — fusing the count into the last.
+        let seed = refs.iter().position(|p| p.typ == CT_BITMAP).unwrap_or(0);
+        load_bitmap(arena.slot_mut(i), refs[seed].typed());
         let dst = acc(arena.slot_mut(i));
-        simd::clear(dst);
-        let mut card = 0;
-        for (idx, p) in refs.iter().enumerate() {
-            if idx + 1 == refs.len() {
-                card = or_into_count(dst, p.typed());
+        let last = (0..refs.len()).rev().find(|&j| j != seed);
+        let mut card = None;
+        for (j, p) in refs.iter().enumerate() {
+            if j == seed {
+                continue;
+            }
+            if Some(j) == last {
+                card = Some(or_into_count(dst, p.typed()));
             } else {
                 or_into(dst, p.typed());
             }
         }
+        let card = card.unwrap_or_else(|| simd::popcount(dst));
         arena.record(key, CT_BITMAP, card, i, BITMAP_BYTES);
     } else {
         let mut card = load_array(arena.slot_mut(i), refs[0].typed());
