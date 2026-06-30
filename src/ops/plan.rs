@@ -51,11 +51,13 @@ impl Plan {
     }
 }
 
-/// Combined cardinality at a union key past which a bitmap (word-OR, O(1024))
-/// beats an element-wise array merge (O(card)). Below it, the union stays a
-/// tight array. The kernel and the plan must agree on this so the slot is sized
-/// for the path execution takes.
-pub(crate) const UNION_DENSE_CARD: u32 = 256;
+/// The single array↔bitmap boundary, shared by every op so containers are
+/// canonical (array iff card ≤ this, bitmap iff above). Union *promotes* past
+/// it; intersect/diff *demote* back below it (`finish_bitmap`). Keeping it equal
+/// to [`ARRAY_MAX_SIZE`] (the wire-format array limit) means a seed with
+/// `card ≤ this` is always an array — so the accumulator choice is type-aware by
+/// construction and never extracts a bitmap.
+pub(crate) const UNION_DENSE_CARD: u32 = ARRAY_MAX_SIZE as u32;
 
 /// Bytes a result container of `card` values takes in op-ready (`_fast`) form:
 /// an array while it fits, otherwise a bitmap. The capacity contract sizes
