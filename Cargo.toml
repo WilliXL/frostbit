@@ -17,6 +17,9 @@ roaring = ["dep:roaring"]
 # Exposes internal modules (byte/format helpers, arena, plan, …) for white-box
 # tests and benchmarks. NOT part of the stable public API — may change anytime.
 internals = []
+# Build the roaring baseline with its SIMD enabled (nightly only) for a fair
+# SIMD-vs-SIMD bench: `cargo +nightly bench --features roaring-simd`.
+roaring-simd = ["roaring", "roaring/simd"]
 
 [dev-dependencies]
 criterion = "0.5"
