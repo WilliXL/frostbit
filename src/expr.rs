@@ -3,46 +3,50 @@
 //! [`BitmapExpr`] is a recursive *definition* — leaves (zero-copy views or
 //! shared owned bitmaps) combined with AND / OR / DIFF. Because Rust builds
 //! children before parents, **construction is analysis**: each combinator folds
-//! its children's [`FoldPlan`]s into one flat, post-order step list, flattening
-//! same-op chains by moving step references (`And(And(a, b), c)` ⇒ one
-//! `intersect([a, b, c])`) and computing the exact operand-stack depth as it
-//! goes. No work-stack, no recursive traversal — every node is handled exactly
-//! once, and the working-set size is known up front.
+//! its children into one flat, post-order step list, flattening same-op chains
+//! (`And(And(a, b), c)` ⇒ one `intersect([a, b, c])`) and, crucially,
+//! propagating each node's output *shape* bottom-up so every op's arena plan
+//! (keys + slot byte-ceilings) is computed **once, up front**.
 //!
-//! [`BitmapExpr::materialize`] runs the finished plan over a preallocated
-//! operand stack, folding with the flat `*_fast` kernels.
+//! [`BitmapExpr::materialize`] then runs that manifest: the executor sizes each
+//! arena straight from the precomputed plan and folds — it does no sizing
+//! analysis of its own.
 
 use std::sync::Arc;
 
 use crate::ops::arena::OpArena;
 use crate::ops::cursor::ContainerCursor;
-use crate::ops::source::{view_container_count, Inputs};
 use crate::ops::kernels;
+use crate::ops::plan::{Op as PlanOp, Plan};
+use crate::ops::shape::{self, view_shape, Shape};
+use crate::ops::source::{view_container_count, Inputs};
 use crate::{FrozenBitmap, FrozenBitmapView};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Op {
     And,
     Or,
-    Diff,
+    Diff, // only used as a never-flatten parent for DIFF operands
 }
 
-/// One linearized instruction: push a leaf, or pop `arity` operands and combine.
+/// One linearized instruction: push a leaf, or pop `arity` operands and fold
+/// them with a fully precomputed arena [`Plan`].
 #[derive(Clone)]
 enum Step<'a> {
     Leaf(FrozenBitmapView<'a>),
     Owned(Arc<FrozenBitmap>),
-    Combine(Op, u32),
+    Combine(u32, Plan),
 }
 
-/// A flat, post-order evaluation plan with its exact peak operand-stack depth.
+/// A flat, post-order evaluation manifest: the step list, this subtree's output
+/// [`Shape`] (for the parent's analysis), and the peak operand-stack depth.
 ///
-/// Built incrementally by the [`BitmapExpr`] combinators (construction-time
-/// analysis) and run by [`FoldPlan::execute`]. Borrows the tree's leaves, so it
-/// lives no longer than the expression it came from.
+/// Built once by the [`BitmapExpr`] combinators; run by [`FoldPlan::execute`]
+/// with no further analysis. Borrows the tree's leaves.
 #[derive(Clone)]
 pub struct FoldPlan<'a> {
     steps: Vec<Step<'a>>,
+    shape: Shape,
     max_depth: usize,
 }
 
@@ -104,8 +108,7 @@ impl<'a> From<Arc<FrozenBitmap>> for BitmapExpr<'a> {
 }
 
 impl<'a> FoldPlan<'a> {
-    /// Peak number of operands live at once during [`execute`](Self::execute) —
-    /// the exact capacity its operand stack is allocated with.
+    /// Peak number of operands live at once during [`execute`](Self::execute).
     pub fn max_stack_depth(&self) -> usize {
         self.max_depth
     }
@@ -118,53 +121,58 @@ impl<'a> FoldPlan<'a> {
             .count()
     }
 
-    /// Fold `children` under `op`, flattening same-op sub-plans in place.
+    /// Fold `children` under `op`, flattening same-op sub-plans and computing the
+    /// output shape (and thus this op's arena plan) from the children's shapes.
     fn combine(op: Op, children: impl IntoIterator<Item = BitmapExpr<'a>>) -> Self {
         let mut steps = Vec::new();
-        let mut arity = 0u32;
-        let mut base = 0usize; // operands live on the stack before the next child
-        let mut max_depth = 0usize;
+        let mut shapes: Vec<Shape> = Vec::new();
+        let (mut arity, mut base, mut max_depth) = (0u32, 0usize, 0usize);
         for child in children {
+            shapes.push(child_shape(&child));
             let (net, depth) = splice(child, op, &mut steps);
             max_depth = max_depth.max(base + depth);
             base += net as usize;
             arity += net;
         }
-        steps.push(Step::Combine(op, arity));
-        // Pre-combine `base` (== arity) operands are live; the result leaves one.
-        FoldPlan { steps, max_depth: max_depth.max(base).max(1) }
+        let (pop, shape) = match op {
+            Op::And => (PlanOp::Intersect, shape::intersect_shape(&shapes)),
+            Op::Or => (PlanOp::Union, shape::union_shape(&shapes)),
+            Op::Diff => unreachable!("combine is AND/OR only"),
+        };
+        steps.push(Step::Combine(arity, shape::to_plan(pop, &shape)));
+        FoldPlan { steps, shape, max_depth: max_depth.max(base).max(1) }
     }
 
     /// `lhs` minus `rhs` (never flattened — DIFF is not associative).
     fn diff(lhs: BitmapExpr<'a>, rhs: BitmapExpr<'a>) -> Self {
+        let shapes = [child_shape(&lhs), child_shape(&rhs)];
         let mut steps = Vec::new();
-        let (_, d0) = splice(lhs, Op::Diff, &mut steps);
+        let (_, d0) = splice(lhs, Op::Diff, &mut steps); // Op::Diff never flattens
         let (_, d1) = splice(rhs, Op::Diff, &mut steps);
-        steps.push(Step::Combine(Op::Diff, 2));
-        FoldPlan { steps, max_depth: d0.max(1 + d1).max(2) }
+        let shape = shape::diff_shape(&shapes);
+        steps.push(Step::Combine(2, shape::to_plan(PlanOp::Diff, &shape)));
+        FoldPlan { steps, shape, max_depth: d0.max(1 + d1).max(2) }
     }
 
-    /// Run the plan over a preallocated operand stack.
-    ///
-    /// Intermediate results stay as pooled [`OpArena`]s and are folded straight
-    /// into the next op — no bitmap is serialized between nodes. Each `Combine`
-    /// folds an in-place slice of the stack (no operand copy) and serializes
-    /// only the single surviving arena at the end.
+    /// Run the manifest over a preallocated operand stack. Each `Combine` sizes
+    /// its arena from the precomputed plan and folds an in-place stack slice (no
+    /// operand copy, no sizing analysis); only the final arena is serialized.
     pub fn execute(&self) -> FrozenBitmap {
         let mut stack: Vec<Acc<'_>> = Vec::with_capacity(self.max_depth);
         for step in &self.steps {
             match step {
                 Step::Leaf(v) => stack.push(Acc::Leaf(*v)),
                 Step::Owned(b) => stack.push(Acc::Leaf(b.view())),
-                Step::Combine(op, arity) => {
+                Step::Combine(arity, plan) => {
                     let start = stack.len() - *arity as usize;
-                    let result = match op {
-                        Op::And => kernels::intersect_into(&stack[start..]),
-                        Op::Or => kernels::union_into(&stack[start..]),
-                        Op::Diff => kernels::diff_into(&stack[start..]),
-                    };
+                    let mut arena = OpArena::from_plan(plan);
+                    match plan.op {
+                        PlanOp::Intersect => kernels::intersect_fold(&mut arena, &stack[start..]),
+                        PlanOp::Union => kernels::union_fold(&mut arena, &stack[start..]),
+                        PlanOp::Diff => kernels::diff_fold(&mut arena, &stack[start..]),
+                    }
                     stack.truncate(start);
-                    stack.push(Acc::Arena(result));
+                    stack.push(Acc::Arena(arena));
                 }
             }
         }
@@ -173,6 +181,15 @@ impl<'a> FoldPlan<'a> {
             Acc::Arena(a) => a.serialize_compact(),
             Acc::Leaf(v) => FrozenBitmap::from_bytes(v.as_bytes()).expect("valid leaf"),
         }
+    }
+}
+
+/// Output shape of a child, for the parent's bottom-up analysis.
+fn child_shape(child: &BitmapExpr<'_>) -> Shape {
+    match child {
+        BitmapExpr::Leaf(v) => view_shape(v),
+        BitmapExpr::Owned(b) => view_shape(&b.view()),
+        BitmapExpr::Combined(p) => p.shape.clone(),
     }
 }
 
@@ -216,22 +233,22 @@ fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (
             steps.push(Step::Owned(b));
             (1, 1)
         }
-        BitmapExpr::Combined(mut plan) => {
-            let root = plan.steps.last().map(|s| match s {
-                Step::Combine(op, _) => *op,
+        BitmapExpr::Combined(mut fp) => {
+            let root = fp.steps.last().map(|s| match s {
+                Step::Combine(_, p) => p.op,
                 _ => unreachable!("a plan always ends in a Combine"),
             });
             let flatten = matches!(
                 (parent, root),
-                (Op::And, Some(Op::And)) | (Op::Or, Some(Op::Or))
+                (Op::And, Some(PlanOp::Intersect)) | (Op::Or, Some(PlanOp::Union))
             );
             if flatten {
-                let Some(Step::Combine(_, k)) = plan.steps.pop() else { unreachable!() };
-                steps.append(&mut plan.steps);
-                (k, plan.max_depth)
+                let Some(Step::Combine(k, _)) = fp.steps.pop() else { unreachable!() };
+                steps.append(&mut fp.steps);
+                (k, fp.max_depth)
             } else {
-                steps.append(&mut plan.steps);
-                (1, plan.max_depth)
+                steps.append(&mut fp.steps);
+                (1, fp.max_depth)
             }
         }
     }

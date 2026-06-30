@@ -46,8 +46,15 @@ pub fn intersect(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
 /// serialize — the tree evaluator chains these without a byte round-trip.
 pub fn intersect_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
     let mut arena = OpArena::from_plan(&plan_intersect(inputs));
+    intersect_fold(&mut arena, inputs);
+    arena
+}
+
+/// Fold `inputs` (AND) into a pre-sized `arena`. The arena's slots come from the
+/// manifest, so this does no sizing analysis — it only drives keys and folds.
+pub fn intersect_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
     if inputs.is_empty() {
-        return arena;
+        return;
     }
     let seed = (0..inputs.len()).min_by_key(|&i| inputs.container_count(i)).unwrap();
     let mut driver = inputs.cursor(seed);
@@ -68,11 +75,10 @@ pub fn intersect_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
             hit
         });
         if present {
-            let slot = arena.claim();
-            intersect_key(&mut arena, slot, key, &refs);
+            let slot = arena.claim_key(key);
+            intersect_key(arena, slot, key, &refs);
         }
     }
-    arena
 }
 
 fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>]) {
@@ -126,11 +132,16 @@ pub fn union(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
 /// OR, folded into a (pooled) arena for the caller to chain or serialize.
 pub fn union_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
     let mut arena = OpArena::from_plan(&plan_union(inputs));
-    fold_keys(inputs, &mut arena, |arena, key, refs| {
-        let slot = arena.claim();
+    union_fold(&mut arena, inputs);
+    arena
+}
+
+/// Fold `inputs` (OR) into a pre-sized `arena` (no sizing analysis).
+pub fn union_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
+    fold_keys(inputs, arena, |arena, key, refs| {
+        let slot = arena.claim_key(key);
         union_key(arena, slot, key, refs);
     });
-    arena
 }
 
 fn union_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>]) {
@@ -175,8 +186,14 @@ pub fn diff(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
 /// DIFF, folded into a (pooled) arena for the caller to chain or serialize.
 pub fn diff_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
     let mut arena = OpArena::from_plan(&plan_diff(inputs));
+    diff_fold(&mut arena, inputs);
+    arena
+}
+
+/// Fold `inputs` (DIFF: `inputs[0]` minus the rest) into a pre-sized `arena`.
+pub fn diff_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
     if inputs.is_empty() {
-        return arena;
+        return;
     }
     let mut a = inputs.cursor(0);
     let mut rhs: Vec<ContainerCursor<'_>> = (1..inputs.len()).map(|i| inputs.cursor(i)).collect();
@@ -190,10 +207,9 @@ pub fn diff_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
                 refs.push(c.get());
             }
         }
-        let slot = arena.claim();
-        diff_key(&mut arena, slot, key, &lhs, &refs);
+        let slot = arena.claim_key(key);
+        diff_key(arena, slot, key, &lhs, &refs);
     }
-    arena
 }
 
 fn diff_key(arena: &mut OpArena, i: usize, key: u16, lhs: &ContainerRef<'_>, rhs: &[ContainerRef<'_>]) {

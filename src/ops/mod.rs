@@ -6,5 +6,6 @@ pub mod cursor;
 pub mod kernels;
 pub mod plan;
 pub mod run;
+pub mod shape;
 mod simd;
 pub mod source;

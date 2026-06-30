@@ -28,12 +28,19 @@ struct Reusable {
     buf: AlignedBuf,
     slot_off: Vec<u32>,
     slot_sz: Vec<u32>,
+    slot_key: Vec<u16>,
     out: Vec<OutEntry>,
 }
 
 impl Default for Reusable {
     fn default() -> Self {
-        Self { buf: aligned_buf(0), slot_off: Vec::new(), slot_sz: Vec::new(), out: Vec::new() }
+        Self {
+            buf: aligned_buf(0),
+            slot_off: Vec::new(),
+            slot_sz: Vec::new(),
+            slot_key: Vec::new(),
+            out: Vec::new(),
+        }
     }
 }
 
@@ -67,6 +74,7 @@ pub struct OpArena {
     buf: AlignedBuf,
     slot_off: Vec<u32>,
     slot_sz: Vec<u32>,
+    slot_key: Vec<u16>,
     out: Vec<OutEntry>,
     scratch_off: usize,
     next_slot: usize,
@@ -81,6 +89,7 @@ impl Drop for OpArena {
             buf: std::mem::replace(&mut self.buf, aligned_buf(0)),
             slot_off: std::mem::take(&mut self.slot_off),
             slot_sz: std::mem::take(&mut self.slot_sz),
+            slot_key: std::mem::take(&mut self.slot_key),
             out: std::mem::take(&mut self.out),
         });
     }
@@ -90,9 +99,10 @@ impl OpArena {
     /// Size a (pooled) buffer for every planned slot + fixed scratch. Bitmap-
     /// capacity slots and the scratch land on 64-byte boundaries for SIMD.
     pub fn from_plan(plan: &Plan) -> Self {
-        let Reusable { mut buf, mut slot_off, mut slot_sz, mut out } = pool::take();
+        let Reusable { mut buf, mut slot_off, mut slot_sz, mut slot_key, mut out } = pool::take();
         slot_off.clear();
         slot_sz.clear();
+        slot_key.clear();
         out.clear();
 
         let mut cursor = 0usize;
@@ -101,6 +111,7 @@ impl OpArena {
             cursor = align_up(cursor, align);
             slot_off.push(cursor as u32);
             slot_sz.push(s.capacity);
+            slot_key.push(s.key);
             cursor += s.capacity as usize;
         }
         let scratch_off = align_up(cursor, BUF_ALIGN);
@@ -119,6 +130,7 @@ impl OpArena {
             buf,
             slot_off,
             slot_sz,
+            slot_key,
             out,
             scratch_off,
             next_slot: 0,
@@ -128,13 +140,17 @@ impl OpArena {
         }
     }
 
-    /// Hand out the next slot index in plan order. Slots are claimed only when
-    /// actually produced (e.g. AND skips non-shared keys), so the count matches
-    /// the plan exactly — there is no grow path if this is exceeded.
+    /// Hand out the slot planned for `key`, skipping planned keys that produced
+    /// nothing (the manifest's key set is a superset of what the fold emits, so
+    /// claiming by key — not position — lands on the correctly-sized slot).
+    /// Keys are claimed ascending, so this is amortized O(1).
     #[inline]
-    pub fn claim(&mut self) -> usize {
+    pub fn claim_key(&mut self, key: u16) -> usize {
+        while self.slot_key[self.next_slot] < key {
+            self.next_slot += 1;
+        }
+        debug_assert_eq!(self.slot_key[self.next_slot], key, "claimed a key absent from the plan");
         let i = self.next_slot;
-        debug_assert!(i < self.num_slots(), "claimed more slots than planned");
         self.next_slot += 1;
         i
     }
