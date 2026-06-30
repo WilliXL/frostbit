@@ -28,6 +28,9 @@ pub use builder::FrozenBitmapBuilder;
 mod view;
 pub use view::{FrozenBitmapView, Iter};
 
+mod expr;
+pub use expr::{BitmapExpr, FoldPlan};
+
 /// Set ops + their static analysis pass. The module is public only under
 /// `internals`; the stable entry points are re-exported below.
 #[cfg(feature = "internals")]

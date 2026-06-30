@@ -197,9 +197,10 @@ fn plans_over_compact_inputs() {
 
 #[test]
 fn empty_inputs() {
-    assert!(plan_intersect(&[]).slots.is_empty());
-    assert!(plan_union(&[]).slots.is_empty());
-    assert!(plan_diff(&[]).slots.is_empty());
+    let empty: &[frostbit::FrozenBitmapView<'_>] = &[];
+    assert!(plan_intersect(empty).slots.is_empty());
+    assert!(plan_union(empty).slots.is_empty());
+    assert!(plan_diff(empty).slots.is_empty());
 }
 
 // --- scale + randomized ----------------------------------------------------

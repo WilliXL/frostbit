@@ -8,17 +8,18 @@ use crate::ops::arena::OpArena;
 use crate::ops::cursor::{ContainerCursor, ContainerRef};
 use crate::ops::plan::{plan_diff, plan_intersect, plan_union, UNION_DENSE_CARD};
 use crate::ops::simd;
+use crate::ops::source::Inputs;
 use crate::{FrozenBitmap, FrozenBitmapView};
 
 /// Drive an op over its keys: at each key, gather the containers present
 /// (advancing the cursors) and hand them to `per_key`. Slots are claimed by
 /// `per_key`, so keys that produce nothing (e.g. AND misses) cost no slot.
-fn fold_keys(
-    inputs: &[FrozenBitmapView<'_>],
+fn fold_keys<I: Inputs + ?Sized>(
+    inputs: &I,
     arena: &mut OpArena,
     mut per_key: impl FnMut(&mut OpArena, u16, &[ContainerRef<'_>]),
 ) {
-    let mut cursors: Vec<ContainerCursor<'_>> = inputs.iter().map(ContainerCursor::new).collect();
+    let mut cursors: Vec<ContainerCursor<'_>> = (0..inputs.len()).map(|i| inputs.cursor(i)).collect();
     let mut refs: Vec<ContainerRef<'_>> = Vec::with_capacity(inputs.len());
     while let Some(key) = cursors.iter().filter_map(|c| c.peek_key()).min() {
         refs.clear();
@@ -37,19 +38,21 @@ fn fold_keys(
 /// N-way intersection (AND). Driven by the input with the fewest containers:
 /// only its keys are visited, and the others are `advance_to`-skipped to each —
 /// so a selective conjunct never forces a full walk of the large inputs.
-pub fn intersect(inputs: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+pub fn intersect(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+    intersect_into(views).serialize()
+}
+
+/// AND, folded into a (pooled) arena left for the caller to fold further or
+/// serialize — the tree evaluator chains these without a byte round-trip.
+pub fn intersect_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
     let mut arena = OpArena::from_plan(&plan_intersect(inputs));
     if inputs.is_empty() {
-        return arena.serialize();
+        return arena;
     }
-    let seed = (0..inputs.len()).min_by_key(|&i| container_count(&inputs[i])).unwrap();
-    let mut driver = ContainerCursor::new(&inputs[seed]);
-    let mut others: Vec<ContainerCursor<'_>> = inputs
-        .iter()
-        .enumerate()
-        .filter(|&(i, _)| i != seed)
-        .map(|(_, v)| ContainerCursor::new(v))
-        .collect();
+    let seed = (0..inputs.len()).min_by_key(|&i| inputs.container_count(i)).unwrap();
+    let mut driver = inputs.cursor(seed);
+    let mut others: Vec<ContainerCursor<'_>> =
+        (0..inputs.len()).filter(|&i| i != seed).map(|i| inputs.cursor(i)).collect();
     let mut refs: Vec<ContainerRef<'_>> = Vec::with_capacity(inputs.len());
 
     while let Some(key) = driver.peek_key() {
@@ -69,23 +72,7 @@ pub fn intersect(inputs: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
             intersect_key(&mut arena, slot, key, &refs);
         }
     }
-    arena.serialize()
-}
-
-/// Number of containers in an input (O(1) for standard; a cheap walk for the
-/// small inline format).
-fn container_count(v: &FrozenBitmapView<'_>) -> usize {
-    if v.is_inline() {
-        let mut c = ContainerCursor::new(v);
-        let mut n = 0;
-        while c.peek_key().is_some() {
-            n += 1;
-            c.advance();
-        }
-        n
-    } else {
-        v.num_containers()
-    }
+    arena
 }
 
 fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>]) {
@@ -127,13 +114,18 @@ fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'
 // --- union ------------------------------------------------------------------
 
 /// N-way union (OR).
-pub fn union(inputs: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+pub fn union(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+    union_into(views).serialize()
+}
+
+/// OR, folded into a (pooled) arena for the caller to chain or serialize.
+pub fn union_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
     let mut arena = OpArena::from_plan(&plan_union(inputs));
     fold_keys(inputs, &mut arena, |arena, key, refs| {
         let slot = arena.claim();
         union_key(arena, slot, key, refs);
     });
-    arena.serialize()
+    arena
 }
 
 fn union_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>]) {
@@ -167,14 +159,19 @@ fn union_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>])
 // --- difference -------------------------------------------------------------
 
 /// N-way difference: `inputs[0]` minus the rest.
-pub fn diff(inputs: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+pub fn diff(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+    diff_into(views).serialize()
+}
+
+/// DIFF, folded into a (pooled) arena for the caller to chain or serialize.
+pub fn diff_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
     let mut arena = OpArena::from_plan(&plan_diff(inputs));
     if inputs.is_empty() {
-        return arena.serialize();
+        return arena;
     }
-    let mut a = ContainerCursor::new(&inputs[0]);
-    let mut rhs: Vec<ContainerCursor<'_>> = inputs[1..].iter().map(ContainerCursor::new).collect();
-    let mut refs: Vec<ContainerRef<'_>> = Vec::with_capacity(rhs.len());
+    let mut a = inputs.cursor(0);
+    let mut rhs: Vec<ContainerCursor<'_>> = (1..inputs.len()).map(|i| inputs.cursor(i)).collect();
+    let mut refs: Vec<ContainerRef<'_>> = Vec::with_capacity(inputs.len());
     while let Some(key) = a.peek_key() {
         let lhs = a.get();
         a.advance();
@@ -187,7 +184,7 @@ pub fn diff(inputs: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
         let slot = arena.claim();
         diff_key(&mut arena, slot, key, &lhs, &refs);
     }
-    arena.serialize()
+    arena
 }
 
 fn diff_key(arena: &mut OpArena, i: usize, key: u16, lhs: &ContainerRef<'_>, rhs: &[ContainerRef<'_>]) {

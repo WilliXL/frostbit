@@ -11,6 +11,7 @@
 
 use crate::bitmap::{aligned_buf, AlignedBuf, FrozenBitmap};
 use crate::format::*;
+use crate::ops::cursor::ContainerRef;
 use crate::ops::plan::Plan;
 
 struct OutEntry {
@@ -188,6 +189,38 @@ impl OpArena {
     #[inline]
     pub fn total_cardinality(&self) -> u64 {
         self.total_card
+    }
+
+    /// Number of recorded containers — an arena read back as a container source.
+    #[inline]
+    pub fn container_count(&self) -> usize {
+        self.out.len()
+    }
+
+    /// Key of the `i`-th recorded container (cheap cursor peek).
+    #[inline]
+    pub(crate) fn container_key(&self, i: usize) -> u16 {
+        self.out[i].key
+    }
+
+    /// The `i`-th recorded container as a zero-copy [`ContainerRef`]. Records are
+    /// ascending by key (every kernel drives its keys ascending), so an arena
+    /// reads back as an ordered source — no re-sort, no serialization.
+    #[inline]
+    pub(crate) fn container_ref(&self, i: usize) -> ContainerRef<'_> {
+        let e = &self.out[i];
+        let off = self.slot_off[e.slot_idx] as usize;
+        ContainerRef {
+            key: e.key,
+            typ: e.typ,
+            card: e.card,
+            data: &self.buf[off..off + e.data_size as usize],
+        }
+    }
+
+    /// Invariant for reading an arena as an ordered source (checked in debug).
+    pub(crate) fn is_key_sorted(&self) -> bool {
+        self.out.windows(2).all(|w| w[0].key <= w[1].key)
     }
 
     /// Compact recorded containers into a standard-format [`FrozenBitmap`].

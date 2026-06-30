@@ -8,7 +8,7 @@
 
 use crate::format::*;
 use crate::ops::cursor::ContainerCursor;
-use crate::FrozenBitmapView;
+use crate::ops::source::Inputs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -79,12 +79,12 @@ fn shrink_slot_bytes(card: u32) -> u32 {
 /// AND: output keys = ∩ of all inputs' keys. Per key, the result ⊆ the
 /// smallest-card input there, so execution seeds from it (expanding run/bitmap
 /// → array when card ≤ 4096) and only shrinks. cap = `shrink_slot_bytes(min_card)`.
-pub fn plan_intersect(inputs: &[FrozenBitmapView<'_>]) -> Plan {
+pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = Vec::new();
     if inputs.is_empty() {
         return Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES };
     }
-    let mut cursors: Vec<ContainerCursor<'_>> = inputs.iter().map(ContainerCursor::new).collect();
+    let mut cursors: Vec<ContainerCursor<'_>> = (0..inputs.len()).map(|i| inputs.cursor(i)).collect();
 
     loop {
         let Some(key) = min_key(&cursors) else { break };
@@ -109,12 +109,12 @@ pub fn plan_intersect(inputs: &[FrozenBitmapView<'_>]) -> Plan {
 /// cardinality exceeds an array, or the runs exceed a bitmap; otherwise the max
 /// of the merged-array, coalesced-run, and largest-single-input sizes. Every
 /// union key gets a slot up front, so a fold never creates one.
-pub fn plan_union(inputs: &[FrozenBitmapView<'_>]) -> Plan {
+pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = Vec::new();
     if inputs.is_empty() {
         return Plan { op: Op::Union, slots, scratch_bytes: SCRATCH_BYTES };
     }
-    let mut cursors: Vec<ContainerCursor<'_>> = inputs.iter().map(ContainerCursor::new).collect();
+    let mut cursors: Vec<ContainerCursor<'_>> = (0..inputs.len()).map(|i| inputs.cursor(i)).collect();
 
     loop {
         let Some(key) = min_key(&cursors) else { break };
@@ -150,14 +150,13 @@ pub fn plan_union(inputs: &[FrozenBitmapView<'_>]) -> Plan {
 /// only remove values within a key, never add a block). A key absent from every
 /// RHS is copied verbatim (cap = its stored bytes); a key present in some RHS
 /// can only shrink from A (cap = `shrink_slot_bytes(A_card)`).
-pub fn plan_diff(inputs: &[FrozenBitmapView<'_>]) -> Plan {
+pub fn plan_diff<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = Vec::new();
     if inputs.is_empty() {
         return Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES };
     }
-    let mut a = ContainerCursor::new(&inputs[0]);
-    let mut rhs: Vec<ContainerCursor<'_>> =
-        inputs[1..].iter().map(ContainerCursor::new).collect();
+    let mut a = inputs.cursor(0);
+    let mut rhs: Vec<ContainerCursor<'_>> = (1..inputs.len()).map(|i| inputs.cursor(i)).collect();
 
     while let Some(key) = a.peek_key() {
         let cr = a.get();
