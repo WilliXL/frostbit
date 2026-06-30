@@ -157,8 +157,12 @@ impl<'a> FoldPlan<'a> {
     /// Run the manifest over a preallocated operand stack. Each `Combine` sizes
     /// its arena from the precomputed plan and folds an in-place stack slice (no
     /// operand copy, no sizing analysis); only the final arena is serialized.
+    /// The operand stack itself is pooled, so a materialize allocates only its
+    /// result.
     pub fn execute(&self) -> FrozenBitmap {
-        let mut stack: Vec<Acc<'_>> = Vec::with_capacity(self.max_depth);
+        let mut guard = ExecStack::take();
+        let stack = guard.borrow();
+        stack.reserve(self.max_depth);
         for step in &self.steps {
             match step {
                 Step::Leaf(v) => stack.push(Acc::Leaf(*v)),
@@ -181,6 +185,62 @@ impl<'a> FoldPlan<'a> {
             Acc::Arena(a) => a.serialize_compact(),
             Acc::Leaf(v) => FrozenBitmap::from_bytes(v.as_bytes()).expect("valid leaf"),
         }
+    }
+}
+
+/// Pooled operand-stack buffer for [`FoldPlan::execute`], reused across
+/// materializations. Lifetime-erased in the pool (only ever stored empty),
+/// loaned at the leaves' lifetime — exactly like the arena and fold pools.
+struct ExecStack {
+    v: Vec<Acc<'static>>,
+}
+
+mod stack_pool {
+    use std::cell::RefCell;
+
+    use super::Acc;
+
+    const MAX_POOLED: usize = 8;
+    thread_local! {
+        static POOL: RefCell<Vec<Vec<Acc<'static>>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn take() -> Vec<Acc<'static>> {
+        POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default()
+    }
+
+    pub(super) fn put(v: Vec<Acc<'static>>) {
+        POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            if p.len() < MAX_POOLED {
+                p.push(v);
+            }
+        });
+    }
+}
+
+impl ExecStack {
+    #[inline]
+    fn take() -> Self {
+        ExecStack { v: stack_pool::take() }
+    }
+
+    /// Borrow the (empty) stack buffer relabeled to the leaves' lifetime `'a`.
+    #[inline]
+    fn borrow<'a>(&mut self) -> &mut Vec<Acc<'a>> {
+        debug_assert!(self.v.is_empty());
+        // SAFETY: the buffer is empty across every pool boundary, so no `'static`
+        // Acc is materialized — we only relabel the empty buffer to the caller's
+        // `'a`. Operands pushed during execute are drained before it returns (or
+        // dropped by `clear` on unwind), so none outlives what it borrows.
+        unsafe { &mut *(&mut self.v as *mut Vec<Acc<'static>> as *mut Vec<Acc<'a>>) }
+    }
+}
+
+impl Drop for ExecStack {
+    fn drop(&mut self) {
+        self.v.clear();
+        stack_pool::put(std::mem::take(&mut self.v));
     }
 }
 
