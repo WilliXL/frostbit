@@ -18,13 +18,35 @@ roaring = ["dep:roaring"]
 # tests and benchmarks. NOT part of the stable public API — may change anytime.
 internals = []
 
+[dev-dependencies]
+criterion = "0.5"
+
 # Op kernel tests live in tests/ops/{intersect,union,diff}.rs under one target.
 [[test]]
 name = "ops"
 path = "tests/ops/main.rs"
+
+# Benchmarks vs roaring (the `roaring` feature is on by default).
+[[bench]]
+name = "ops"
+path = "benchmarks/ops.rs"
+harness = false
+required-features = ["roaring"]
+
+[[bench]]
+name = "trees"
+path = "benchmarks/trees.rs"
+harness = false
+required-features = ["roaring"]
 
 # Keep 10M-element round-trip tests fast under `cargo test`.
 [profile.dev]
 opt-level = 1
 [profile.dev.package."*"]
 opt-level = 2
+
+# Benches reflect production builds.
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
