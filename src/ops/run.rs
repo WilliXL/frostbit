@@ -114,6 +114,42 @@ pub fn diff(a: &[Run], b: &[Run], out: &mut [Run]) -> (usize, u32) {
     (nr, card)
 }
 
+/// `a \ b` where `b` is a sorted point set (array container): split each run
+/// around the points it contains. Returns `(num_runs, cardinality)`. Output is
+/// bounded by `a.len() + b.len()` runs.
+pub fn diff_array(a: &[Run], b: &[u16], out: &mut [Run]) -> (usize, u32) {
+    if b.is_empty() {
+        return copy(a, out);
+    }
+    let (mut bi, mut nr, mut card) = (0, 0, 0u32);
+    for ar in a {
+        let (mut lo, hi) = (ar.start as u32, ar.end() as u32);
+        while bi < b.len() && (b[bi] as u32) < lo {
+            bi += 1;
+        }
+        let mut bj = bi;
+        while bj < b.len() && lo <= hi {
+            let v = b[bj] as u32;
+            if v > hi {
+                break;
+            }
+            if v > lo {
+                out[nr] = run(lo, v - 1);
+                card += v - lo;
+                nr += 1;
+            }
+            lo = v + 1;
+            bj += 1;
+        }
+        if lo <= hi {
+            out[nr] = run(lo, hi);
+            card += hi - lo + 1;
+            nr += 1;
+        }
+    }
+    (nr, card)
+}
+
 #[inline]
 fn copy(src: &[Run], out: &mut [Run]) -> (usize, u32) {
     out[..src.len()].copy_from_slice(src);

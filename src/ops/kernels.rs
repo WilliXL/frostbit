@@ -111,7 +111,8 @@ fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'
             let (slot, scratch) = arena.slot_and_scratch(i);
             card = bitmap_and_count(acc(slot), scratch, p.typed());
         }
-        arena.record(key, CT_BITMAP, card, i, BITMAP_BYTES);
+        let (typ, bytes) = finish_bitmap(arena, i, card);
+        arena.record(key, typ, card, i, bytes);
     }
 }
 
@@ -219,12 +220,9 @@ fn diff_key(arena: &mut OpArena, i: usize, key: u16, lhs: &ContainerRef<'_>, rhs
             card = array_diff(slot, card, p.typed(), scratch);
         }
         arena.record(key, CT_ARRAY, card, i, card as usize * 2);
-    } else if lhs.typ == CT_RUN
-        && all_runs(rhs)
-        && lhs.num_runs() + rhs.iter().map(|r| r.num_runs()).sum::<usize>() <= MAX_RUNS
-    {
-        // Dense run minus dense runs stays a run container.
-        let (card, bytes) = run_fold(arena, i, lhs, rhs, run::diff);
+    } else if lhs.typ == CT_RUN && diff_run_bound(lhs, rhs).is_some_and(|n| n <= MAX_RUNS) {
+        // Dense run minus runs/arrays stays a run container (split, no expand).
+        let (card, bytes) = run_fold_diff(arena, i, lhs, rhs);
         arena.record(key, CT_RUN, card, i, bytes);
     } else {
         load_bitmap(arena.slot_mut(i), lhs.typed());
@@ -237,7 +235,8 @@ fn diff_key(arena: &mut OpArena, i: usize, key: u16, lhs: &ContainerRef<'_>, rhs
                 clear_into(dst, p.typed());
             }
         }
-        arena.record(key, CT_BITMAP, card, i, BITMAP_BYTES);
+        let (typ, bytes) = finish_bitmap(arena, i, card);
+        arena.record(key, typ, card, i, bytes);
     }
 }
 
@@ -294,6 +293,70 @@ fn run_fold(
     let dst: &mut [Run] = bytemuck::cast_slice_mut(&mut slot[2..2 + nr * 4]);
     dst.copy_from_slice(&acc[..nr]);
     (card, 2 + nr * 4)
+}
+
+/// Worst-case output run count for `lhs \ rhs` keeping `lhs` in run form — or
+/// `None` if a subtrahend is a bitmap/inline (forces a bitmap result). Each
+/// array point and each run boundary can add one fragment.
+fn diff_run_bound(lhs: &ContainerRef<'_>, rhs: &[ContainerRef<'_>]) -> Option<usize> {
+    let mut total = lhs.num_runs();
+    for r in rhs {
+        match r.typ {
+            CT_RUN => total += r.num_runs(),
+            CT_ARRAY => total += r.card as usize,
+            _ => return None,
+        }
+    }
+    Some(total)
+}
+
+/// `lhs \ rhs` keeping runs: fragment `lhs` runs around run/array subtrahends
+/// (no bitmap expansion). Writes a `CT_RUN` container to slot `i`.
+fn run_fold_diff(
+    arena: &mut OpArena,
+    i: usize,
+    lhs: &ContainerRef<'_>,
+    rhs: &[ContainerRef<'_>],
+) -> (u32, usize) {
+    let (slot, scratch) = arena.slot_and_scratch(i);
+    let (a, b) = scratch.split_at_mut(BITMAP_BYTES);
+    let acc: &mut [Run] = bytemuck::cast_slice_mut(a);
+    let tmp: &mut [Run] = bytemuck::cast_slice_mut(b);
+
+    let l = as_runs(lhs);
+    acc[..l.len()].copy_from_slice(l);
+    let mut nr = l.len();
+    let mut card = lhs.card;
+    for p in rhs {
+        let (n, c) = match p.typed() {
+            Data::Run(pr) => run::diff(&acc[..nr], pr, tmp),
+            Data::Array(pa) => run::diff_array(&acc[..nr], pa, tmp),
+            _ => unreachable!("run_fold_diff partner must be run or array"),
+        };
+        acc[..n].copy_from_slice(&tmp[..n]);
+        nr = n;
+        card = c;
+    }
+
+    write_u16(slot, 0, nr as u16);
+    let dst: &mut [Run] = bytemuck::cast_slice_mut(&mut slot[2..2 + nr * 4]);
+    dst.copy_from_slice(&acc[..nr]);
+    (card, 2 + nr * 4)
+}
+
+/// Finish a bitmap accumulator: downgrade to an array when sparse enough
+/// (cheaper downstream folds + smaller output), else keep the bitmap. Returns
+/// the recorded `(type, data bytes)`.
+fn finish_bitmap(arena: &mut OpArena, i: usize, card: u32) -> (u8, usize) {
+    if card == 0 || card > ARRAY_MAX_SIZE as u32 {
+        return (CT_BITMAP, BITMAP_BYTES);
+    }
+    let (slot, scratch) = arena.slot_and_scratch(i);
+    let n = Data::new(CT_BITMAP, card, &slot[..BITMAP_BYTES])
+        .write_sorted(bytemuck::cast_slice_mut(scratch));
+    let bytes = n * 2;
+    slot[..bytes].copy_from_slice(&scratch[..bytes]);
+    (CT_ARRAY, bytes)
 }
 
 /// The first `BITMAP_BYTES` of a slot, as a mutable bitmap.

@@ -82,6 +82,29 @@ fn run_ops_match_roaring() {
 }
 
 #[test]
+fn run_minus_array_matches_roaring() {
+    // Dense run minuend, sparse-array subtrahends → run-splitting path.
+    let mut st = 0x9911u64;
+    for _ in 0..150 {
+        let keys = 1 + (splitmix64(&mut st) % 3) as u16;
+        let run = run_set(keys, 2 + (splitmix64(&mut st) % 5) as u32, 4000 + (splitmix64(&mut st) % 8000) as u32, 0);
+        // 1-2 sparse array subtrahends in the same keys.
+        let n_sub = 1 + (splitmix64(&mut st) % 2) as usize;
+        let mut inputs = vec![run];
+        for _ in 0..n_sub {
+            let cnt = 200 + (splitmix64(&mut st) % 2000) as usize;
+            let mut s = std::collections::BTreeSet::new();
+            for _ in 0..cnt {
+                let k = (splitmix64(&mut st) % keys.max(1) as u64) as u16;
+                s.insert(at(k, (splitmix64(&mut st) % 65536) as u32));
+            }
+            inputs.push(s.into_iter().collect());
+        }
+        check(&inputs);
+    }
+}
+
+#[test]
 fn run_tree_matches_roaring() {
     // Arena-chained tree eval over run leaves: (a ∪ b) ∩ (c \ d).
     let a = fz(&run_set(3, 3, 9000, 0));
