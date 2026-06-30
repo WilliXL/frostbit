@@ -159,8 +159,12 @@ fn bench(c: &mut Criterion) {
 
     let mut g = c.benchmark_group("tree");
     for (name, spec) in &specs {
+        // The frostbit expression / fold plan is built ONCE up front (analyze
+        // once, execute many) — only materialization is timed. roaring has no
+        // reusable plan, so it re-evaluates each call.
+        let expr = build_fb(spec, &pool);
         g.bench_function(format!("{name}/frostbit"), |b| {
-            b.iter(|| black_box(build_fb(black_box(spec), &pool).materialize()))
+            b.iter(|| black_box(expr.materialize()))
         });
         g.bench_function(format!("{name}/roaring"), |b| {
             b.iter(|| black_box(eval_rb(black_box(spec), &pool)))

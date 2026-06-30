@@ -448,12 +448,15 @@ fn clear_into_count(dst: &mut Bitmap, data: Data<'_>) -> u32 {
 #[inline]
 fn array_intersect(slot: &mut [u8], card: u32, data: Data<'_>, scratch: &mut [u8]) -> u32 {
     let acc: &mut [u16] = bytemuck::cast_slice_mut(slot);
-    if let Data::Array(b) = data {
-        let tmp: &mut [u16] = bytemuck::cast_slice_mut(scratch);
-        tmp[..card as usize].copy_from_slice(&acc[..card as usize]);
-        return simd::array_intersect(&tmp[..card as usize], b, acc) as u32;
+    match data {
+        Data::Array(b) => {
+            let tmp: &mut [u16] = bytemuck::cast_slice_mut(scratch);
+            tmp[..card as usize].copy_from_slice(&acc[..card as usize]);
+            simd::array_intersect(&tmp[..card as usize], b, acc) as u32
+        }
+        Data::Run(runs) => retain_runs(acc, card, runs, true),
+        _ => retain(acc, card, |lo| data.contains(lo)),
     }
-    retain(acc, card, |lo| data.contains(lo))
 }
 
 /// Array accumulator `∪= partner` (sorted-merge through `scratch`).
@@ -472,12 +475,34 @@ fn array_union(slot: &mut [u8], card: u32, data: Data<'_>, scratch: &mut [u8]) -
 #[inline]
 fn array_diff(slot: &mut [u8], card: u32, data: Data<'_>, scratch: &mut [u8]) -> u32 {
     let acc: &mut [u16] = bytemuck::cast_slice_mut(slot);
-    if let Data::Array(b) = data {
-        let tmp: &mut [u16] = bytemuck::cast_slice_mut(scratch);
-        tmp[..card as usize].copy_from_slice(&acc[..card as usize]);
-        return simd::array_diff(&tmp[..card as usize], b, acc) as u32;
+    match data {
+        Data::Array(b) => {
+            let tmp: &mut [u16] = bytemuck::cast_slice_mut(scratch);
+            tmp[..card as usize].copy_from_slice(&acc[..card as usize]);
+            simd::array_diff(&tmp[..card as usize], b, acc) as u32
+        }
+        Data::Run(runs) => retain_runs(acc, card, runs, false),
+        _ => retain(acc, card, |lo| !data.contains(lo)),
     }
-    retain(acc, card, |lo| !data.contains(lo))
+}
+
+/// Galloping array ∩ / ∖ run: filter sorted `acc` by run membership in one
+/// pass (O(card + runs)), keeping values inside runs when `keep_inside`.
+#[inline]
+fn retain_runs(acc: &mut [u16], card: u32, runs: &[Run], keep_inside: bool) -> u32 {
+    let (mut ri, mut w) = (0usize, 0usize);
+    for r in 0..card as usize {
+        let v = acc[r];
+        while ri < runs.len() && runs[ri].end() < v {
+            ri += 1;
+        }
+        let inside = ri < runs.len() && runs[ri].start <= v;
+        if inside == keep_inside {
+            acc[w] = v;
+            w += 1;
+        }
+    }
+    w as u32
 }
 
 /// Keep `acc[..card]` values where `keep` holds, compacting in place.
