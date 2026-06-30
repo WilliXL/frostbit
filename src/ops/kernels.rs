@@ -1,13 +1,14 @@
 //! Fold kernels. Each writes only into pre-sized arena slots (the arena's
 //! `record` debug-asserts the no-runtime-allocation invariant) and dispatches
-//! on the typed [`Data`] view, delegating the heavy lifting to [`crate::simd`].
+//! on the typed [`Data`] view, delegating the heavy lifting to [`super::simd`].
 
 use crate::container::{as_bitmap_mut, Bitmap, Data};
 use crate::format::*;
 use crate::ops::arena::OpArena;
 use crate::ops::cursor::{ContainerCursor, ContainerRef};
 use crate::ops::plan::{plan_diff, plan_intersect, plan_union, UNION_DENSE_CARD};
-use crate::{simd, FrozenBitmap, FrozenBitmapView};
+use crate::ops::simd;
+use crate::{FrozenBitmap, FrozenBitmapView};
 
 /// Drive an op over its keys: at each key, gather the containers present
 /// (advancing the cursors) and hand them to `per_key`. Slots are claimed by

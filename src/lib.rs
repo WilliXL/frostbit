@@ -21,7 +21,6 @@ mod bitmap;
 pub use bitmap::FrozenBitmap;
 
 mod container;
-mod simd;
 
 mod builder;
 pub use builder::FrozenBitmapBuilder;

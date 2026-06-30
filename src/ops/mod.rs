@@ -4,3 +4,4 @@ pub mod arena;
 pub mod cursor;
 pub mod kernels;
 pub mod plan;
+mod simd;

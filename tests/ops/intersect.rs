@@ -1,25 +1,10 @@
 //! Intersection kernel: value equality vs roaring across shapes/encodings.
-//! Runs in debug, so the arena's no-alloc `record` debug-assert fires on any
-//! slot overflow.
-#![cfg(feature = "internals")]
-
-use std::collections::BTreeSet;
 
 use frostbit::ops::kernels::intersect;
-use frostbit::{FrozenBitmap, FrozenBitmapBuilder, FrozenBitmapView};
-use roaring::RoaringBitmap;
 
-fn build(values: &[u32], standard: bool) -> FrozenBitmap {
-    let mut b = FrozenBitmapBuilder::new();
-    b.extend_sorted(values.iter().copied());
-    if standard { b.finish_standard() } else { b.finish() }
-}
+use crate::common::*;
 
-fn rb(values: &[u32]) -> RoaringBitmap {
-    RoaringBitmap::from_sorted_iter(values.iter().copied()).unwrap()
-}
-
-fn expect_intersect(inputs: &[Vec<u32>]) -> Vec<u32> {
+fn expect(inputs: &[Vec<u32>]) -> Vec<u32> {
     let mut acc = rb(&inputs[0]);
     for v in &inputs[1..] {
         acc &= rb(v);
@@ -28,29 +13,14 @@ fn expect_intersect(inputs: &[Vec<u32>]) -> Vec<u32> {
 }
 
 fn check(inputs: &[Vec<u32>], builds: &[bool]) {
-    let bms: Vec<FrozenBitmap> =
-        inputs.iter().enumerate().map(|(i, v)| build(v, builds[i % builds.len()])).collect();
-    let views: Vec<FrozenBitmapView<'_>> = bms.iter().map(|b| b.view()).collect();
-    let got: Vec<u32> = intersect(&views).view().iter().collect();
-    assert_eq!(got, expect_intersect(inputs), "intersect mismatch");
-}
-
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
-fn at(k: u16, lo: u16) -> u32 {
-    ((k as u32) << 16) | lo as u32
+    let bms: Vec<_> = inputs.iter().enumerate().map(|(i, v)| build(v, builds[i % builds.len()])).collect();
+    let got: Vec<u32> = intersect(&views(&bms)).view().iter().collect();
+    assert_eq!(got, expect(inputs), "intersect mismatch");
 }
 
 #[test]
 fn empty_and_singletons() {
-    let bm = intersect(&[]);
-    assert_eq!(bm.view().len(), 0);
+    assert_eq!(intersect(&[]).view().len(), 0);
     check(&[vec![1, 2, 3]], &[true]); // single input = identity
     check(&[vec![1, 2, 3], vec![]], &[true, true]); // with empty → empty
 }
@@ -124,34 +94,16 @@ fn boundary_cardinalities() {
 fn ten_million_scale() {
     let a: Vec<u32> = (0..10_000_000u32).step_by(2).collect();
     let b: Vec<u32> = (0..10_000_000u32).step_by(3).collect();
-    let av = build(&a, true);
-    let bv = build(&b, true);
-    let got: Vec<u32> = intersect(&[av.view(), bv.view()]).view().iter().collect();
-    let want: Vec<u32> = (rb(&a) & rb(&b)).iter().collect();
-    assert_eq!(got, want);
+    let bms = [build(&a, true), build(&b, true)];
+    let got: Vec<u32> = intersect(&views(&bms)).view().iter().collect();
+    assert_eq!(got, (rb(&a) & rb(&b)).iter().collect::<Vec<_>>());
 }
 
 #[test]
 fn randomized_differential() {
     let mut st = 0x1234_A0D0_u64;
     for _ in 0..2000 {
-        let n = 2 + (splitmix64(&mut st) % 4) as usize;
-        let mk = |st: &mut u64| -> Vec<u32> {
-            let cnt = (splitmix64(st) % 3000) as usize;
-            let spread = 1u64 << (17 + (splitmix64(st) % 9));
-            let mut s = BTreeSet::new();
-            for _ in 0..cnt {
-                s.insert((splitmix64(st) % spread) as u32);
-            }
-            s.into_iter().collect()
-        };
-        let mut inputs: Vec<Vec<u32>> = (0..n).map(|_| mk(&mut st)).collect();
-        for v in inputs.iter_mut() {
-            if v.is_empty() {
-                *v = vec![splitmix64(&mut st) as u32];
-            }
-        }
-        let builds: Vec<bool> = (0..n).map(|_| (splitmix64(&mut st) & 1) == 0).collect();
+        let (inputs, builds) = random_inputs(&mut st);
         check(&inputs, &builds);
     }
 }
