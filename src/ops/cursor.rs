@@ -153,3 +153,81 @@ impl<'a> ContainerCursor<'a> {
         false
     }
 }
+
+/// The reusable cursor + ref buffers a fold drives with, lifetime-erased for
+/// pooling (they are only ever stored empty, see [`FoldScratch`]).
+#[derive(Default)]
+struct Buffers {
+    cursors: Vec<ContainerCursor<'static>>,
+    refs: Vec<ContainerRef<'static>>,
+}
+
+mod scratch_pool {
+    use std::cell::RefCell;
+
+    use super::Buffers;
+
+    const MAX_POOLED: usize = 8;
+    thread_local! {
+        static POOL: RefCell<Vec<Buffers>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn take() -> Buffers {
+        POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default()
+    }
+
+    pub(super) fn put(b: Buffers) {
+        POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            if p.len() < MAX_POOLED {
+                p.push(b);
+            }
+        });
+    }
+}
+
+/// Pooled scratch for driving a fold: a cursor buffer and a per-key ref buffer,
+/// reused across folds so a fold allocates nothing in steady state. The buffers
+/// are loaned at the inputs' lifetime via [`borrow`](Self::borrow) and returned
+/// (cleared) on drop — exactly like [`OpArena`]'s working memory.
+pub struct FoldScratch {
+    cursors: Vec<ContainerCursor<'static>>,
+    refs: Vec<ContainerRef<'static>>,
+}
+
+impl FoldScratch {
+    #[inline]
+    pub fn take() -> Self {
+        let Buffers { cursors, refs } = scratch_pool::take();
+        FoldScratch { cursors, refs }
+    }
+
+    /// Borrow the (empty) cursor and ref buffers relabeled to the inputs'
+    /// lifetime `'b`.
+    #[inline]
+    pub fn borrow<'b>(&mut self) -> (&mut Vec<ContainerCursor<'b>>, &mut Vec<ContainerRef<'b>>) {
+        debug_assert!(self.cursors.is_empty() && self.refs.is_empty());
+        // SAFETY: both buffers are empty across every loan boundary (cleared on
+        // take and on drop), so no `'static` cursor/ref is ever materialized —
+        // we only relabel the empty buffers to the caller's `'b`. The loaned
+        // cursors borrow the fold's inputs and are cleared (on drop) before the
+        // fold returns, so they never outlive what they point at. Vec layout is
+        // lifetime-invariant, so the relabel is a no-op at runtime.
+        unsafe {
+            let c = &mut self.cursors as *mut Vec<ContainerCursor<'static>> as *mut Vec<ContainerCursor<'b>>;
+            let r = &mut self.refs as *mut Vec<ContainerRef<'static>> as *mut Vec<ContainerRef<'b>>;
+            (&mut *c, &mut *r)
+        }
+    }
+}
+
+impl Drop for FoldScratch {
+    fn drop(&mut self) {
+        self.cursors.clear();
+        self.refs.clear();
+        scratch_pool::put(Buffers {
+            cursors: std::mem::take(&mut self.cursors),
+            refs: std::mem::take(&mut self.refs),
+        });
+    }
+}

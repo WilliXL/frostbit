@@ -5,7 +5,7 @@
 use crate::container::{as_bitmap_mut, Bitmap, Data, Run};
 use crate::format::*;
 use crate::ops::arena::OpArena;
-use crate::ops::cursor::{ContainerCursor, ContainerRef};
+use crate::ops::cursor::{ContainerRef, FoldScratch};
 use crate::ops::plan::{plan_diff, plan_intersect, plan_union, UNION_DENSE_CARD};
 use crate::ops::source::Inputs;
 use crate::ops::{run, simd};
@@ -19,17 +19,20 @@ fn fold_keys<I: Inputs + ?Sized>(
     arena: &mut OpArena,
     mut per_key: impl FnMut(&mut OpArena, u16, &[ContainerRef<'_>]),
 ) {
-    let mut cursors: Vec<ContainerCursor<'_>> = (0..inputs.len()).map(|i| inputs.cursor(i)).collect();
-    let mut refs: Vec<ContainerRef<'_>> = Vec::with_capacity(inputs.len());
+    let mut scratch = FoldScratch::take();
+    let (cursors, refs) = scratch.borrow();
+    for i in 0..inputs.len() {
+        cursors.push(inputs.cursor(i));
+    }
     while let Some(key) = cursors.iter().filter_map(|c| c.peek_key()).min() {
         refs.clear();
-        for c in &mut cursors {
+        for c in cursors.iter_mut() {
             if c.peek_key() == Some(key) {
                 refs.push(c.get());
                 c.advance();
             }
         }
-        per_key(arena, key, &refs);
+        per_key(arena, key, refs);
     }
 }
 
@@ -58,9 +61,11 @@ pub fn intersect_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
     }
     let seed = (0..inputs.len()).min_by_key(|&i| inputs.container_count(i)).unwrap();
     let mut driver = inputs.cursor(seed);
-    let mut others: Vec<ContainerCursor<'_>> =
-        (0..inputs.len()).filter(|&i| i != seed).map(|i| inputs.cursor(i)).collect();
-    let mut refs: Vec<ContainerRef<'_>> = Vec::with_capacity(inputs.len());
+    let mut scratch = FoldScratch::take();
+    let (others, refs) = scratch.borrow();
+    for i in (0..inputs.len()).filter(|&i| i != seed) {
+        others.push(inputs.cursor(i));
+    }
 
     while let Some(key) = driver.peek_key() {
         let seed_ref = driver.get();
@@ -76,7 +81,7 @@ pub fn intersect_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
         });
         if present {
             let slot = arena.claim_key(key);
-            intersect_key(arena, slot, key, &refs);
+            intersect_key(arena, slot, key, refs);
         }
     }
 }
@@ -204,19 +209,22 @@ pub fn diff_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
         return;
     }
     let mut a = inputs.cursor(0);
-    let mut rhs: Vec<ContainerCursor<'_>> = (1..inputs.len()).map(|i| inputs.cursor(i)).collect();
-    let mut refs: Vec<ContainerRef<'_>> = Vec::with_capacity(inputs.len());
+    let mut scratch = FoldScratch::take();
+    let (rhs, refs) = scratch.borrow();
+    for i in 1..inputs.len() {
+        rhs.push(inputs.cursor(i));
+    }
     while let Some(key) = a.peek_key() {
         let lhs = a.get();
         a.advance();
         refs.clear();
-        for c in &mut rhs {
+        for c in rhs.iter_mut() {
             if c.advance_to(key) {
                 refs.push(c.get());
             }
         }
         let slot = arena.claim_key(key);
-        diff_key(arena, slot, key, &lhs, &refs);
+        diff_key(arena, slot, key, &lhs, refs);
     }
 }
 
