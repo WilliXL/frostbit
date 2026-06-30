@@ -19,6 +19,7 @@ const BITMAP_BYTES: usize = BITMAP_WORDS * 8;
 
 mod array_diff;
 mod array_intersect;
+mod array_scan;
 mod array_union;
 mod bitmap_andnot;
 mod bitmap_build;
@@ -29,7 +30,7 @@ mod popcount;
 pub(crate) use array_diff::array_diff;
 pub(crate) use array_intersect::array_intersect;
 pub(crate) use array_union::array_union;
-pub(crate) use bitmap_and::{and, and_count};
+pub(crate) use bitmap_and::and_count;
 pub(crate) use bitmap_andnot::{andnot, andnot_count};
 pub(crate) use bitmap_build::{clear, clear_runs, clear_values, copy, set_runs, set_values};
 pub(crate) use bitmap_or::{or, or_count};

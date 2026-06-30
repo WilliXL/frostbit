@@ -81,29 +81,17 @@ fn broadcast_scan<const W: usize>(
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn intersect_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
-    use std::arch::aarch64::*;
-    broadcast_scan::<8>(a, b, out, |freq, f, v| unsafe {
-        let win = vld1q_u16(freq.as_ptr().add(f));
-        vmaxvq_u16(vceqq_u16(win, vdupq_n_u16(v))) != 0
-    })
+    broadcast_scan::<8>(a, b, out, |freq, f, v| unsafe { super::array_scan::window_has_neon(freq, f, v) })
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn intersect_sse2(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
-    use std::arch::x86_64::*;
-    broadcast_scan::<8>(a, b, out, |freq, f, v| unsafe {
-        let win = _mm_loadu_si128(freq.as_ptr().add(f).cast());
-        _mm_movemask_epi8(_mm_cmpeq_epi16(win, _mm_set1_epi16(v as i16))) != 0
-    })
+    broadcast_scan::<8>(a, b, out, |freq, f, v| unsafe { super::array_scan::window_has_sse2(freq, f, v) })
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn intersect_avx2(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
-    use std::arch::x86_64::*;
-    broadcast_scan::<16>(a, b, out, |freq, f, v| unsafe {
-        let win = _mm256_loadu_si256(freq.as_ptr().add(f).cast());
-        _mm256_movemask_epi8(_mm256_cmpeq_epi16(win, _mm256_set1_epi16(v as i16))) != 0
-    })
+    broadcast_scan::<16>(a, b, out, |freq, f, v| unsafe { super::array_scan::window_has_avx2(freq, f, v) })
 }
