@@ -42,8 +42,10 @@ fn bench(c: &mut Criterion) {
     let sparse = Set::new(&(0..16).map(|_| arrays(32, 800, &mut st)).collect::<Vec<_>>());
     let dense = Set::new(&(0..16).map(|i| dense(16, 5000, i * 97, &mut st)).collect::<Vec<_>>());
     // Dense run containers (a few long ranges per key) — exercises the native
-    // run path instead of bitmap expansion.
-    let runs = Set::new(&(0..16).map(|i| run_ranges(16, 4, 6000, i * 1500)).collect::<Vec<_>>());
+    // run path instead of bitmap expansion. Roaring is run-optimized here so
+    // it's run-vs-run (best-vs-best), not run-vs-bitmap.
+    let mut runs = Set::new(&(0..16).map(|i| run_ranges(16, 4, 6000, i * 1500)).collect::<Vec<_>>());
+    runs.optimize_roaring();
 
     // Cross-engine parity over the full 16-way fold of each op.
     for (name, set) in [("sparse", &sparse), ("dense", &dense), ("runs", &runs)] {

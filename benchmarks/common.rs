@@ -100,17 +100,17 @@ impl Set {
                 b.finish()
             })
             .collect();
-        // Best-vs-best: frostbit's builder auto-picks run encoding, so let
-        // roaring run-optimize too (a no-op for non-run-friendly inputs).
-        let rbs = inputs
-            .iter()
-            .map(|v| {
-                let mut r: RoaringBitmap = v.iter().copied().collect();
-                r.optimize();
-                r
-            })
-            .collect();
+        let rbs = inputs.iter().map(|v| v.iter().copied().collect()).collect();
         Set { fbs, rbs }
+    }
+
+    /// Run-optimize the roaring side (frostbit's builder already auto-encodes
+    /// runs). Use only where it helps roaring — e.g. dedicated run workloads;
+    /// on mixed trees roaring's run-container ops are slower than its bitmaps.
+    pub fn optimize_roaring(&mut self) {
+        for r in &mut self.rbs {
+            r.optimize();
+        }
     }
     pub fn views(&self, n: usize) -> Vec<FrozenBitmapView<'_>> {
         self.fbs[..n].iter().map(|b| b.view()).collect()
