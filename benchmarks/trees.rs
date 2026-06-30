@@ -114,8 +114,10 @@ fn mixed_pool() -> Set {
     for i in 0..4 {
         inputs.push(dense(32, 12_000, i * 777, &mut st));
     }
+    // Contiguous ID ranges → run containers with a few *long* runs (how runs
+    // actually arise in filter/search), not hundreds of tiny ones.
     for i in 0..3 {
-        inputs.push(runs(24, 50 + i * 10, 25));
+        inputs.push(runs(20, 3000 + i * 1500, 5000));
     }
     Set::new(&inputs)
 }
