@@ -92,21 +92,21 @@ fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'
         }
         arena.record(key, CT_ARRAY, card, i, card as usize * 2);
     } else {
+        // Bitmap accumulator: fold partners with a fused AND+count so the result
+        // card is always known, and stop early once it empties — a high-fan-in
+        // AND of dense inputs collapses to nothing after a few steps.
         load_bitmap(arena.slot_mut(i), refs[seed].typed());
-        let last = (0..refs.len()).rev().find(|&j| j != seed);
-        let mut card = None;
+        let mut card = refs[seed].card;
         for (j, p) in refs.iter().enumerate() {
             if j == seed {
                 continue;
             }
-            let (slot, scratch) = arena.slot_and_scratch(i);
-            if Some(j) == last {
-                card = Some(bitmap_and_count(acc(slot), scratch, p.typed()));
-            } else {
-                bitmap_and(acc(slot), scratch, p.typed());
+            if card == 0 {
+                break;
             }
+            let (slot, scratch) = arena.slot_and_scratch(i);
+            card = bitmap_and_count(acc(slot), scratch, p.typed());
         }
-        let card = card.unwrap_or_else(|| simd::popcount(acc(arena.slot_mut(i))));
         arena.record(key, CT_BITMAP, card, i, BITMAP_BYTES);
     }
 }
@@ -275,21 +275,8 @@ fn clear_into(dst: &mut Bitmap, data: Data<'_>) {
     }
 }
 
-/// Bitmap accumulator `&= partner`, staying a bitmap. Non-bitmap partners are
-/// materialized into `scratch` first.
-#[inline]
-fn bitmap_and(dst: &mut Bitmap, scratch: &mut [u8], data: Data<'_>) {
-    if let Data::Bitmap(b) = data {
-        simd::and(dst, b);
-    } else {
-        let tmp = acc(scratch);
-        simd::clear(tmp);
-        or_into(tmp, data);
-        simd::and(dst, tmp);
-    }
-}
-
-/// `bitmap_and` fused with a population count of the result (one pass).
+/// Bitmap accumulator `&= partner`, fused with a population count of the result
+/// (one pass). Non-bitmap partners are materialized into `scratch` first.
 #[inline]
 fn bitmap_and_count(dst: &mut Bitmap, scratch: &mut [u8], data: Data<'_>) -> u32 {
     if let Data::Bitmap(b) = data {

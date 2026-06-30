@@ -1,5 +1,11 @@
 //! Shared benchmark helpers: deterministic inputs and matched frozen/roaring
 //! sets, so every bench compares the two engines on identical data.
+//!
+//! CAVEAT — fairness: `roaring`'s `simd` feature is nightly-only
+//! (`#![feature(portable_simd)]`) and off by default, so on a stable toolchain
+//! roaring runs **scalar** while frostbit uses hand-written SIMD. These numbers
+//! therefore flatter frostbit on bitmap-dense work; for a SIMD-vs-SIMD
+//! comparison, build on nightly with `roaring`'s `simd` feature enabled.
 #![allow(dead_code)]
 
 use frostbit::{FrozenBitmap, FrozenBitmapView};

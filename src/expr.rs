@@ -168,8 +168,9 @@ impl<'a> FoldPlan<'a> {
                 }
             }
         }
+        // Terminal result → compact (smallest), like roaring's output.
         match stack.pop().expect("non-empty plan") {
-            Acc::Arena(a) => a.serialize(),
+            Acc::Arena(a) => a.serialize_compact(),
             Acc::Leaf(v) => FrozenBitmap::from_bytes(v.as_bytes()).expect("valid leaf"),
         }
     }
