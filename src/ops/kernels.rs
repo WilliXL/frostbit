@@ -2,13 +2,13 @@
 //! `record` debug-asserts the no-runtime-allocation invariant) and dispatches
 //! on the typed [`Data`] view, delegating the heavy lifting to [`super::simd`].
 
-use crate::container::{as_bitmap_mut, Bitmap, Data};
+use crate::container::{as_bitmap_mut, Bitmap, Data, Run};
 use crate::format::*;
 use crate::ops::arena::OpArena;
 use crate::ops::cursor::{ContainerCursor, ContainerRef};
 use crate::ops::plan::{plan_diff, plan_intersect, plan_union, UNION_DENSE_CARD};
-use crate::ops::simd;
 use crate::ops::source::Inputs;
+use crate::ops::{run, simd};
 use crate::{FrozenBitmap, FrozenBitmapView};
 
 /// Drive an op over its keys: at each key, gather the containers present
@@ -91,6 +91,10 @@ fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'
             card = array_intersect(slot, card, p.typed(), scratch);
         }
         arena.record(key, CT_ARRAY, card, i, card as usize * 2);
+    } else if all_runs(refs) && total_runs(refs) <= MAX_RUNS {
+        // Dense run containers stay runs (O(runs), not O(bitmap)).
+        let (card, bytes) = run_fold(arena, i, &refs[0], &refs[1..], run::intersect);
+        arena.record(key, CT_RUN, card, i, bytes);
     } else {
         // Bitmap accumulator: fold partners with a fused AND+count so the result
         // card is always known, and stop early once it empties — a high-fan-in
@@ -134,7 +138,11 @@ fn union_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>])
     let any_bitmap = refs.iter().any(|p| p.typ == CT_BITMAP);
     let needs_bitmap = any_bitmap || sum_card > UNION_DENSE_CARD || total_runs > MAX_RUNS;
 
-    if needs_bitmap {
+    if needs_bitmap && all_runs(refs) && total_runs <= MAX_RUNS {
+        // Run ∪ Run stays a (coalesced) run container.
+        let (card, bytes) = run_fold(arena, i, &refs[0], &refs[1..], run::union);
+        arena.record(key, CT_RUN, card, i, bytes);
+    } else if needs_bitmap {
         let dst = acc(arena.slot_mut(i));
         simd::clear(dst);
         let mut card = 0;
@@ -211,6 +219,13 @@ fn diff_key(arena: &mut OpArena, i: usize, key: u16, lhs: &ContainerRef<'_>, rhs
             card = array_diff(slot, card, p.typed(), scratch);
         }
         arena.record(key, CT_ARRAY, card, i, card as usize * 2);
+    } else if lhs.typ == CT_RUN
+        && all_runs(rhs)
+        && lhs.num_runs() + rhs.iter().map(|r| r.num_runs()).sum::<usize>() <= MAX_RUNS
+    {
+        // Dense run minus dense runs stays a run container.
+        let (card, bytes) = run_fold(arena, i, lhs, rhs, run::diff);
+        arena.record(key, CT_RUN, card, i, bytes);
     } else {
         load_bitmap(arena.slot_mut(i), lhs.typed());
         let dst = acc(arena.slot_mut(i));
@@ -227,6 +242,59 @@ fn diff_key(arena: &mut OpArena, i: usize, key: u16, lhs: &ContainerRef<'_>, rhs
 }
 
 // --- shared helpers ---------------------------------------------------------
+
+/// Whether every container is run-encoded — the precondition for a native run
+/// fold. Taken only inside a bitmap-sized slot, where a `≤ MAX_RUNS` run
+/// container always fits.
+#[inline]
+fn all_runs(refs: &[ContainerRef<'_>]) -> bool {
+    !refs.is_empty() && refs.iter().all(|r| r.typ == CT_RUN)
+}
+
+#[inline]
+fn total_runs(refs: &[ContainerRef<'_>]) -> usize {
+    refs.iter().map(|r| r.num_runs()).sum()
+}
+
+#[inline]
+fn as_runs<'a>(r: &ContainerRef<'a>) -> &'a [Run] {
+    match r.typed() {
+        Data::Run(runs) => runs,
+        _ => unreachable!("as_runs on a non-run container"),
+    }
+}
+
+/// Fold `seed` then `partners` with a native run `op`, writing a `CT_RUN`
+/// container into slot `i`. Scratch is split into two run buffers and the
+/// result copied to the slot. Returns `(cardinality, data bytes)`.
+fn run_fold(
+    arena: &mut OpArena,
+    i: usize,
+    seed: &ContainerRef<'_>,
+    partners: &[ContainerRef<'_>],
+    op: fn(&[Run], &[Run], &mut [Run]) -> (usize, u32),
+) -> (u32, usize) {
+    let (slot, scratch) = arena.slot_and_scratch(i);
+    let (a, b) = scratch.split_at_mut(BITMAP_BYTES);
+    let acc: &mut [Run] = bytemuck::cast_slice_mut(a);
+    let tmp: &mut [Run] = bytemuck::cast_slice_mut(b);
+
+    let s = as_runs(seed);
+    acc[..s.len()].copy_from_slice(s);
+    let mut nr = s.len();
+    let mut card = seed.card;
+    for p in partners {
+        let (n, c) = op(&acc[..nr], as_runs(p), tmp);
+        acc[..n].copy_from_slice(&tmp[..n]);
+        nr = n;
+        card = c;
+    }
+
+    write_u16(slot, 0, nr as u16);
+    let dst: &mut [Run] = bytemuck::cast_slice_mut(&mut slot[2..2 + nr * 4]);
+    dst.copy_from_slice(&acc[..nr]);
+    (card, 2 + nr * 4)
+}
 
 /// The first `BITMAP_BYTES` of a slot, as a mutable bitmap.
 #[inline]

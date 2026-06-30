@@ -67,6 +67,23 @@ pub fn runs(keys: u16, block: u32, gap: u32) -> Vec<u32> {
     sorted(v)
 }
 
+/// `keys` containers of `nranges` long ranges (`rlen` each, phase-shifted) —
+/// dense and run-encoded (the kernels take the native run path).
+pub fn run_ranges(keys: u16, nranges: u32, rlen: u32, phase: u32) -> Vec<u32> {
+    let stride = 65536 / nranges;
+    let mut v = Vec::new();
+    for k in 0..keys {
+        for i in 0..nranges {
+            let start = (i * stride + phase) % 65536;
+            let end = (start + rlen).min(65535);
+            for lo in start..=end {
+                v.push(at(k, lo as u16));
+            }
+        }
+    }
+    sorted(v)
+}
+
 /// One workload in both representations.
 pub struct Set {
     pub fbs: Vec<FrozenBitmap>,
@@ -83,7 +100,16 @@ impl Set {
                 b.finish()
             })
             .collect();
-        let rbs = inputs.iter().map(|v| v.iter().copied().collect()).collect();
+        // Best-vs-best: frostbit's builder auto-picks run encoding, so let
+        // roaring run-optimize too (a no-op for non-run-friendly inputs).
+        let rbs = inputs
+            .iter()
+            .map(|v| {
+                let mut r: RoaringBitmap = v.iter().copied().collect();
+                r.optimize();
+                r
+            })
+            .collect();
         Set { fbs, rbs }
     }
     pub fn views(&self, n: usize) -> Vec<FrozenBitmapView<'_>> {

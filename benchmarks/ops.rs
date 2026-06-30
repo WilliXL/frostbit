@@ -41,9 +41,12 @@ fn bench(c: &mut Criterion) {
     // intersections non-empty and unions non-trivial).
     let sparse = Set::new(&(0..16).map(|_| arrays(32, 800, &mut st)).collect::<Vec<_>>());
     let dense = Set::new(&(0..16).map(|i| dense(16, 5000, i * 97, &mut st)).collect::<Vec<_>>());
+    // Dense run containers (a few long ranges per key) — exercises the native
+    // run path instead of bitmap expansion.
+    let runs = Set::new(&(0..16).map(|i| run_ranges(16, 4, 6000, i * 1500)).collect::<Vec<_>>());
 
     // Cross-engine parity over the full 16-way fold of each op.
-    for (name, set) in [("sparse", &sparse), ("dense", &dense)] {
+    for (name, set) in [("sparse", &sparse), ("dense", &dense), ("runs", &runs)] {
         let fv = set.views(set.len());
         let rv = &set.rbs[..];
         assert_eq!(fb_vec(&intersect_fast(&fv)), rb_vec(&rb_and(rv)), "AND {name}");
@@ -51,7 +54,7 @@ fn bench(c: &mut Criterion) {
         assert_eq!(fb_vec(&difference_fast(&fv)), rb_vec(&rb_diff(rv)), "DIFF {name}");
     }
 
-    let sets: [(&str, &Set); 2] = [("sparse", &sparse), ("dense", &dense)];
+    let sets: [(&str, &Set); 3] = [("sparse", &sparse), ("dense", &dense), ("runs", &runs)];
     sweep(c, "intersect", |v| intersect_fast(v), rb_and, &sets);
     sweep(c, "union", |v| union_fast(v), rb_or, &sets);
     sweep(c, "diff", |v| difference_fast(v), rb_diff, &sets);

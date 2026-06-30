@@ -5,5 +5,6 @@ pub mod arena;
 pub mod cursor;
 pub mod kernels;
 pub mod plan;
+pub mod run;
 mod simd;
 pub mod source;
