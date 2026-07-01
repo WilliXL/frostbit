@@ -4,8 +4,74 @@
 //! pass `(src, dst)`. NEON's `BIC` is `a & !b`, so it takes `(dst, src)`.
 
 use super::Bitmap;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::format::BITMAP_WORDS;
+
+/// `dst = a & !b`, returning the result's population count in one pass — avoids
+/// the copy that `load_bitmap(a)` + `andnot(dst, b)` would do (the win on a
+/// single dense subtraction).
+#[inline]
+pub(crate) fn andnot_into_count(dst: &mut Bitmap, a: &Bitmap, b: &Bitmap) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        if is_x86_feature_detected!("avx2") {
+            return andnot_into_count_avx2(dst, a, b);
+        }
+        return andnot_into_count_sse2(dst, a, b);
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        return andnot_into_count_neon(dst, a, b);
+    }
+    #[allow(unreachable_code)]
+    {
+        let mut c = 0;
+        for ((d, x), y) in dst.iter_mut().zip(a).zip(b) {
+            *d = *x & !*y;
+            c += d.count_ones();
+        }
+        c
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn andnot_into_count_neon(dst: &mut Bitmap, a: &Bitmap, b: &Bitmap) -> u32 {
+    use std::arch::aarch64::*;
+    let mut acc = vdupq_n_u16(0);
+    for i in (0..BITMAP_WORDS).step_by(2) {
+        let r = vbicq_u64(vld1q_u64(a.as_ptr().add(i)), vld1q_u64(b.as_ptr().add(i)));
+        vst1q_u64(dst.as_mut_ptr().add(i), r);
+        acc = vpadalq_u8(acc, vcntq_u8(vreinterpretq_u8_u64(r)));
+    }
+    vaddlvq_u16(acc)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn andnot_into_count_sse2(dst: &mut Bitmap, a: &Bitmap, b: &Bitmap) -> u32 {
+    use std::arch::x86_64::*;
+    let (dp, ap, bp) =
+        (dst.as_mut_ptr().cast::<__m128i>(), a.as_ptr().cast::<__m128i>(), b.as_ptr().cast::<__m128i>());
+    for i in 0..BITMAP_WORDS / 2 {
+        let r = _mm_andnot_si128(_mm_loadu_si128(bp.add(i)), _mm_loadu_si128(ap.add(i)));
+        _mm_storeu_si128(dp.add(i), r);
+    }
+    dst.iter().map(|w| w.count_ones()).sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn andnot_into_count_avx2(dst: &mut Bitmap, a: &Bitmap, b: &Bitmap) -> u32 {
+    use std::arch::x86_64::*;
+    let (dp, ap, bp) =
+        (dst.as_mut_ptr().cast::<__m256i>(), a.as_ptr().cast::<__m256i>(), b.as_ptr().cast::<__m256i>());
+    for i in 0..BITMAP_WORDS / 4 {
+        let r = _mm256_andnot_si256(_mm256_loadu_si256(bp.add(i)), _mm256_loadu_si256(ap.add(i)));
+        _mm256_storeu_si256(dp.add(i), r);
+    }
+    dst.iter().map(|w| w.count_ones()).sum()
+}
 
 /// `dst &= !src`.
 #[inline]

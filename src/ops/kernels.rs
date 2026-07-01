@@ -260,6 +260,16 @@ fn diff_key(arena: &mut OpArena, i: usize, key: u16, lhs: &ContainerRef<'_>, rhs
         let (card, bytes) = run_fold_diff(arena, i, lhs, rhs);
         arena.record(key, CT_RUN, card, i, bytes);
     } else {
+        // One dense bitmap minus one bitmap: fuse `slot = lhs & !rhs` in a single
+        // pass, skipping the `load_bitmap` copy of lhs.
+        if let [r0] = rhs {
+            if let (Data::Bitmap(lb), Data::Bitmap(rb)) = (lhs.typed(), r0.typed()) {
+                let card = simd::andnot_into_count(acc(arena.slot_mut(i)), lb, rb);
+                let (typ, bytes) = finish_bitmap(arena, i, card);
+                arena.record(key, typ, card, i, bytes);
+                return;
+            }
+        }
         load_bitmap(arena.slot_mut(i), lhs.typed());
         let dst = acc(arena.slot_mut(i));
         let mut card = 0;
