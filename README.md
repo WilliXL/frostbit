@@ -187,61 +187,65 @@ serialization are implemented and extensively tested — differential against
 
 ## Benchmarks
 
-Measured with [criterion](https://docs.rs/criterion) (30 samples × 4 s per
-bench) against `roaring` 0.11.4 with its nightly `simd` feature enabled, on
-Apple Silicon (aarch64 / NEON):
+frostbit is compared against **two** `roaring` 0.11.4 variants: the default
+build (scalar array kernels — what a stable-toolchain user gets) and the
+nightly-only `simd` feature build. One binary can't hold both, so the runner
+does two passes into one criterion directory and renders combined tables:
 
 ```
-cargo +nightly bench --features roaring-simd
+./benchmarks/run.sh     # stable pass + nightly `simd` pass + table report
 ```
 
+Criterion medians, 30 samples × 4 s per bench, Apple Silicon (aarch64 / NEON).
 `roaring` is the mutable `RoaringBitmap`; it has no reusable plan, so it
 re-evaluates on each call, whereas a `BitmapExpr` fold plan is built once. Tree
-benchmarks **include plan construction** in the timed region. Numbers are
-criterion medians from one full run on a shared laptop — indicative, and they
-vary a few percent run to run.
+benchmarks **include plan construction** in the timed region. Numbers are from
+one full run on a shared laptop — indicative, ±a few percent run to run.
 
 ### Expression trees
 
 Realistic boolean filter shapes over a mixed-container leaf pool:
 
-| shape | frostbit | roaring |
-|---|---:|---:|
-| `conj5` — nested ANDs, flattened to one 5-way | **49 µs** | 82 µs |
-| `filter` — `base ∩ OR(domains) ∩ (¬lang)` | **26 µs** | 45 µs |
-| `dnf` — OR of AND-groups | **52 µs** | 79 µs |
-| `cnf3` — AND of OR-groups | 105 µs | 103 µs |
+| shape | frostbit | roaring | roaring `simd` |
+|---|---:|---:|---:|
+| `conj5` — nested ANDs, flattened to one 5-way | **48 µs** | 319 µs | 81 µs |
+| `filter` — `base ∩ OR(domains) ∩ (¬lang)` | **26 µs** | 42 µs | 44 µs |
+| `dnf` — OR of AND-groups | **50 µs** | 636 µs | 78 µs |
+| `cnf3` — AND of OR-groups | 108 µs | 363 µs | **101 µs** |
 
-Randomly-generated trees (2–38 leaves) win across the board, 1.3×–5.8×: a
-4-leaf tree in **3.9 µs** vs 23 µs, an 18-leaf in **110 µs** vs 269 µs, a
-31-leaf in **133 µs** vs 469 µs.
+Randomly-generated trees (2–38 leaves) win every shape against both variants —
+1.5×–6.7×: a 4-leaf tree in **3.8 µs** vs 22 µs, an 18-leaf in **108 µs** vs
+269/263 µs, a 31-leaf in **132 µs** vs 546/461 µs.
 
 ### Query-shape optimizations
 
-| | frostbit | roaring |
-|---|---:|---:|
-| **Hole-punching** — narrow filter ∩ wide OR-groups (dead blocks skipped) | **7.5 µs** *(241 µs un-punched)* | 382 µs |
-| **Short-circuit** — AND with an empty subtree (sibling never evaluated) | **137 ns** | 402 µs |
+| | frostbit | roaring | roaring `simd` |
+|---|---:|---:|---:|
+| **Hole-punching** — narrow filter ∩ wide OR-groups (dead blocks skipped) | **7.4 µs** *(241 µs un-punched)* | 886 µs | 375 µs |
+| **Short-circuit** — AND with an empty subtree (sibling never evaluated) | **137 ns** | 862 µs | 396 µs |
 
 ### N-way flat ops (8-way)
 
-frostbit / roaring, in µs; **bold** is faster:
+| 8-way | frostbit | roaring | roaring `simd` |
+|---|---:|---:|---:|
+| intersect · sparse arrays | **17 µs** | 106 µs | 25 µs |
+| intersect · dense bitmaps | **12 µs** | 23 µs | 22 µs |
+| intersect · run containers | **2.7 µs** | 4.4 µs | 4.5 µs |
+| union · sparse arrays | **118 µs** | 1.23 ms | 808 µs |
+| union · dense bitmaps | **21 µs** | 40 µs | 39 µs |
+| union · run containers | **3.0 µs** | 7.3 µs | 7.1 µs |
+| difference · sparse arrays | 88 µs | 1.08 ms | **81 µs** |
+| difference · dense bitmaps | **54 µs** | 154 µs | 150 µs |
+| difference · run containers | **2.0 µs** | 5.0 µs | 5.1 µs |
 
-| | sparse arrays | dense bitmaps | run containers |
-|---|---|---|---|
-| `intersect` | **17** / 25 | **13** / 23 | **2.7** / 4.5 |
-| `union` | **117** / 784 | **21** / 39 | **3.2** / 7.4 |
-| `difference` | 85 / **81** | **56** / 153 | **2.1** / 5.1 |
-
-frostbit wins the sweep at every arity for intersect (sparse, dense, and runs),
-union (up to 6.7× at 8-way sparse), dense difference (~3–4×), and run
-difference (~2.5×). Balanced sorted-array intersect / union / difference each
-use a SIMD shuffle-merge (CRoaring-style compare-all-pairs and Inoue–Taura
-rotate networks, NEON + x86); heavily-skewed pairs dispatch to a galloping
-search. The one trail is **high-arity sparse-array difference** (8-way ~5%,
-16-way varies 175–220 µs vs roaring's ~185 run-to-run): its isolated fold
-profile matches roaring — the residual is machine-load variance, not kernel
-work. 2-way sparse difference and `cnf3` sit within a few percent either way.
+Against the default `roaring` build, frostbit wins **every cell** of the full
+2–16-way sweep, 1.2×–12× (sparse-array ops are 5–12×: roaring's array kernels
+are scalar there, frostbit's SIMD shuffle-merges — CRoaring-style
+compare-all-pairs and Inoue–Taura rotate networks, NEON + x86 — always run).
+Against the nightly `simd` build the sweep still goes to frostbit everywhere
+except **high-arity sparse-array difference** (~0.9×, its isolated fold profile
+matches — the residual is the measurement's noise band) and near-ties on `cnf3`
+and 16-way run-intersect.
 
 ## Features
 
