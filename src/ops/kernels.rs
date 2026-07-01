@@ -66,6 +66,9 @@ pub fn intersect_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
     for i in (0..inputs.len()).filter(|&i| i != seed) {
         others.push(inputs.cursor(i));
     }
+    // Fold the most-selective (fewest-container) partners first: the per-key
+    // presence check rejects sooner and the accumulator shrinks faster.
+    others.sort_by_key(|c| c.container_count());
 
     while let Some(key) = driver.peek_key() {
         let seed_ref = driver.get();

@@ -209,6 +209,23 @@ fn bench(c: &mut Criterion) {
         b.iter(|| black_box(eval_rb(black_box(&sel_spec), &sel)))
     });
     h.finish();
+
+    // Short-circuit: AND(∅-subtree, expensive OR). `diff(leaf0, leaf0)` is empty,
+    // so frostbit skips evaluating the wide OR entirely; roaring must build it.
+    let sc = Set::new(&[
+        band(0, 2, 100, &mut st2),   // 0: for the empty diff
+        band(0, 200, 300, &mut st2), // 1..=3: expensive OR operands
+        band(0, 200, 300, &mut st2),
+        band(0, 200, 300, &mut st2),
+    ]);
+    let sc_spec = and(vec![diff(leaf(0), leaf(0)), or(vec![leaf(1), leaf(2), leaf(3)])]);
+    assert!(fb_vec(&build_fb(&sc_spec, &sc).materialize()).is_empty(), "shortcircuit empty");
+    assert!(rb_vec(&eval_rb(&sc_spec, &sc)).is_empty());
+    let sc_fb = build_fb(&sc_spec, &sc);
+    let mut s = c.benchmark_group("shortcircuit");
+    s.bench_function("empty_and/frostbit", |b| b.iter(|| black_box(sc_fb.materialize())));
+    s.bench_function("empty_and/roaring", |b| b.iter(|| black_box(eval_rb(black_box(&sc_spec), &sc))));
+    s.finish();
 }
 
 criterion_group! {

@@ -21,7 +21,7 @@ use crate::ops::kernels;
 use crate::ops::plan::{Op as PlanOp, Plan};
 use crate::ops::shape::{self, view_shape, Shape};
 use crate::ops::source::{view_container_count, Inputs};
-use crate::{FrozenBitmap, FrozenBitmapView};
+use crate::{FrozenBitmap, FrozenBitmapBuilder, FrozenBitmapView};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Op {
@@ -37,6 +37,12 @@ enum Step<'a> {
     Leaf(FrozenBitmapView<'a>),
     Owned(Arc<FrozenBitmap>),
     Combine(u32, Plan),
+    /// Short-circuit guard for an AND/DIFF: if the operand just produced (top of
+    /// stack) is empty, the whole op is empty — drop its `pop` partial operands,
+    /// push an empty result, and jump `skip` steps forward (past the fold),
+    /// skipping the remaining operands' evaluation. `skip` is a *relative* offset
+    /// so it survives this subtree being spliced (index-shifted) into a parent.
+    Guard { skip: u32, pop: u32 },
 }
 
 /// A flat, post-order evaluation manifest: the step list, this subtree's output
@@ -161,28 +167,43 @@ impl<'a> FoldPlan<'a> {
         let mut shapes: Vec<Shape> = Vec::new();
         let (mut arity, mut base, mut max_depth) = (0u32, 0usize, 0usize);
         for child in children {
-            let (shape, net, depth) = splice(child, op, &mut steps);
+            let (shape, net, depth, guardable) = splice(child, op, &mut steps);
             shapes.push(shape);
             max_depth = max_depth.max(base + depth);
             base += net as usize;
             arity += net;
+            // After each subtree operand of an AND, guard: if it evaluated empty
+            // the whole AND is empty, so skip the rest. `skip_to` is patched to
+            // jump past the fold once its index is known.
+            if op == Op::And && guardable {
+                steps.push(Step::Guard { skip: u32::MAX, pop: base as u32 });
+            }
         }
         let (pop, shape) = match op {
             Op::And => (PlanOp::Intersect, shape::intersect_shape(&shapes)),
             Op::Or => (PlanOp::Union, shape::union_shape(&shapes)),
             Op::Diff => unreachable!("combine is AND/OR only"),
         };
+        let after = steps.len() + 1;
         steps.push(Step::Combine(arity, shape::to_plan(pop, &shape)));
+        patch_guards(&mut steps, after);
         FoldPlan { steps, shape, max_depth: max_depth.max(base).max(1), live: None }
     }
 
     /// `lhs` minus `rhs` (never flattened — DIFF is not associative).
     fn diff(lhs: BitmapExpr<'a>, rhs: BitmapExpr<'a>) -> Self {
         let mut steps = Vec::new();
-        let (s0, _, d0) = splice(lhs, Op::Diff, &mut steps); // Op::Diff never flattens
-        let (s1, _, d1) = splice(rhs, Op::Diff, &mut steps);
+        let (s0, _, d0, lhs_guardable) = splice(lhs, Op::Diff, &mut steps); // Op::Diff never flattens
+        // An empty lhs makes the whole difference empty (the rhs only removes),
+        // so guard it and skip evaluating the rhs.
+        if lhs_guardable {
+            steps.push(Step::Guard { skip: u32::MAX, pop: 1 });
+        }
+        let (s1, _, d1, _) = splice(rhs, Op::Diff, &mut steps);
         let shape = shape::diff_shape(&[s0, s1]);
+        let after = steps.len() + 1;
         steps.push(Step::Combine(2, shape::to_plan(PlanOp::Diff, &shape)));
+        patch_guards(&mut steps, after);
         FoldPlan { steps, shape, max_depth: d0.max(1 + d1).max(2), live: None }
     }
 
@@ -196,10 +217,20 @@ impl<'a> FoldPlan<'a> {
         let stack = guard.borrow();
         stack.reserve(self.max_depth);
         let mask = self.live.as_deref();
-        for step in &self.steps {
-            match step {
+        let mut pc = 0;
+        while pc < self.steps.len() {
+            match &self.steps[pc] {
                 Step::Leaf(v) => stack.push(Acc::Leaf(*v)),
                 Step::Owned(b) => stack.push(Acc::Leaf(b.view())),
+                Step::Guard { skip, pop } => {
+                    if stack.last().is_some_and(Acc::is_empty) {
+                        let keep = stack.len() - *pop as usize;
+                        stack.truncate(keep);
+                        stack.push(Acc::Empty);
+                        pc += *skip as usize;
+                        continue;
+                    }
+                }
                 Step::Combine(arity, plan) => {
                     let start = stack.len() - *arity as usize;
                     let mut arena = OpArena::from_plan(plan);
@@ -213,11 +244,13 @@ impl<'a> FoldPlan<'a> {
                     stack.push(Acc::Arena(arena));
                 }
             }
+            pc += 1;
         }
         // Terminal result → compact (smallest), like roaring's output.
         match stack.pop().expect("non-empty plan") {
             Acc::Arena(a) => a.serialize_compact(),
             Acc::Leaf(v) => FrozenBitmap::from_bytes(v.as_bytes()).expect("valid leaf"),
+            Acc::Empty => FrozenBitmapBuilder::new().finish(),
         }
     }
 }
@@ -283,6 +316,19 @@ impl Drop for ExecStack {
 enum Acc<'a> {
     Leaf(FrozenBitmapView<'a>),
     Arena(OpArena),
+    /// A short-circuited (empty) operand or result.
+    Empty,
+}
+
+impl Acc<'_> {
+    #[inline]
+    fn is_empty(&self) -> bool {
+        match self {
+            Acc::Leaf(v) => view_container_count(v) == 0,
+            Acc::Arena(a) => a.is_empty(),
+            Acc::Empty => true,
+        }
+    }
 }
 
 /// One `Combine`'s operand slice, optionally hole-punched. Leaf cursors skip
@@ -304,6 +350,7 @@ impl Inputs for Masked<'_, '_> {
             (Acc::Leaf(v), Some(mask)) => ContainerCursor::new_live(v, mask),
             (Acc::Leaf(v), None) => ContainerCursor::new(v),
             (Acc::Arena(a), _) => ContainerCursor::from_arena(a),
+            (Acc::Empty, _) => ContainerCursor::empty(),
         }
     }
     #[inline]
@@ -311,6 +358,7 @@ impl Inputs for Masked<'_, '_> {
         match &self.accs[i] {
             Acc::Leaf(v) => view_container_count(v),
             Acc::Arena(a) => a.container_count(),
+            Acc::Empty => 0,
         }
     }
 }
@@ -319,17 +367,17 @@ impl Inputs for Masked<'_, '_> {
 /// and yield its output [`Shape`] for the parent's analysis (moved out of a
 /// sub-plan, never cloned). Returns `(shape, net operands contributed, peak
 /// stack depth during its steps)`.
-fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (Shape, u32, usize) {
+fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (Shape, u32, usize, bool) {
     match child {
         BitmapExpr::Leaf(v) => {
             let shape = view_shape(&v);
             steps.push(Step::Leaf(v));
-            (shape, 1, 1)
+            (shape, 1, 1, false)
         }
         BitmapExpr::Owned(b) => {
             let shape = view_shape(&b.view());
             steps.push(Step::Owned(b));
-            (shape, 1, 1)
+            (shape, 1, 1, false)
         }
         BitmapExpr::Combined(mut fp) => {
             let shape = std::mem::take(&mut fp.shape);
@@ -343,11 +391,31 @@ fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (
             );
             if flatten {
                 let Some(Step::Combine(k, _)) = fp.steps.pop() else { unreachable!() };
+                // Inlining moves these steps up, so the child's own guards (which
+                // jumped to its now-popped Combine) no longer apply — drop them.
+                // The flattened operands are guarded, if at all, by this op.
+                fp.steps.retain(|s| !matches!(s, Step::Guard { .. }));
                 steps.append(&mut fp.steps);
-                (shape, k, fp.max_depth)
+                (shape, k, fp.max_depth, false)
             } else {
+                // A non-flattened subtree: a single operand whose result may be
+                // empty — the caller guards it.
                 steps.append(&mut fp.steps);
-                (shape, 1, fp.max_depth)
+                (shape, 1, fp.max_depth, true)
+            }
+        }
+    }
+}
+
+/// Resolve every not-yet-targeted guard (`skip == u32::MAX`) in `steps` to a
+/// relative offset landing on `target` (the step past the enclosing fold), once
+/// that index is known. Guards belonging to nested, non-flattened subtrees are
+/// already resolved (to their own folds) — leave them.
+fn patch_guards(steps: &mut [Step<'_>], target: usize) {
+    for (i, s) in steps.iter_mut().enumerate() {
+        if let Step::Guard { skip, .. } = s {
+            if *skip == u32::MAX {
+                *skip = (target - i) as u32;
             }
         }
     }

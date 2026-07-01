@@ -93,6 +93,18 @@ impl<'a> ContainerCursor<'a> {
         Self { backing: Backing::Arena(arena), n: arena.container_count(), pos: 0, live: None }
     }
 
+    /// Total container count — a selectivity proxy (fewer ⇒ more selective).
+    #[inline]
+    pub fn container_count(&self) -> usize {
+        self.n
+    }
+
+    /// An exhausted cursor (yields nothing) — a short-circuited empty operand.
+    #[inline]
+    pub fn empty() -> Self {
+        Self { backing: Backing::Bytes { bytes: &[], inline: false, data_base: 0 }, n: 0, pos: 0, live: None }
+    }
+
     /// Key of the current container, or `None` when exhausted.
     #[inline]
     pub fn peek_key(&self) -> Option<u16> {

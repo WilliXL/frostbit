@@ -125,6 +125,37 @@ fn random_trees_match_roaring() {
     }
 }
 
+/// Short-circuit is result-preserving. An AND (or DIFF) with an empty
+/// non-flattened subtree operand must yield exactly the oracle — empty for the
+/// AND, and the lhs-driven result for the DIFF — whether or not the guard fires.
+#[test]
+fn short_circuit_empty_subtree() {
+    let x = fz(&[1, 2, 3]);
+    let big = fz(&(0..5000).collect::<Vec<_>>());
+    // diff(x, x) = ∅ (a non-flattened subtree); AND(∅, big) = ∅.
+    let and = BitmapExpr::and([
+        BitmapExpr::difference(BitmapExpr::leaf(x.view()), BitmapExpr::leaf(x.view())),
+        BitmapExpr::leaf(big.view()),
+    ]);
+    assert!(and.materialize().view().iter().next().is_none());
+    assert!(and.punch_holes().materialize().view().iter().next().is_none());
+
+    // DIFF(∅, big) = ∅ — the lhs guard fires.
+    let d = BitmapExpr::difference(
+        BitmapExpr::difference(BitmapExpr::leaf(x.view()), BitmapExpr::leaf(x.view())),
+        BitmapExpr::leaf(big.view()),
+    );
+    assert!(d.materialize().view().iter().next().is_none());
+
+    // A non-empty subtree must NOT short-circuit: AND(OR(x, big), big) = big ∩ … = x∪big ∩ big = big.
+    let keep = BitmapExpr::and([
+        BitmapExpr::or([BitmapExpr::leaf(x.view()), BitmapExpr::leaf(big.view())]),
+        BitmapExpr::leaf(big.view()),
+    ]);
+    let got: Vec<u32> = keep.materialize().view().iter().collect();
+    assert_eq!(got, (0..5000).collect::<Vec<_>>());
+}
+
 /// Hole-punching is result-preserving: an AND-rooted tree, punched, must yield
 /// exactly the roaring oracle. Roots are forced to N-way ANDs (the only shape
 /// `punch_holes` engages), with random — often OR/DIFF — branches underneath so
