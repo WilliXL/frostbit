@@ -170,18 +170,20 @@ unsafe fn diff_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     let mut vb = vld1q_u16(b.as_ptr());
     let mut matched = 0u32;
     loop {
-        let c0 = vceqq_u16(va, vb);
-        let c1 = vceqq_u16(va, vextq_u16::<1>(vb, vb));
-        let c2 = vceqq_u16(va, vextq_u16::<2>(vb, vb));
-        let c3 = vceqq_u16(va, vextq_u16::<3>(vb, vb));
-        let c4 = vceqq_u16(va, vextq_u16::<4>(vb, vb));
-        let c5 = vceqq_u16(va, vextq_u16::<5>(vb, vb));
-        let c6 = vceqq_u16(va, vextq_u16::<6>(vb, vb));
-        let c7 = vceqq_u16(va, vextq_u16::<7>(vb, vb));
-        let m = vorrq_u16(
-            vorrq_u16(vorrq_u16(c0, c1), vorrq_u16(c2, c3)),
-            vorrq_u16(vorrq_u16(c4, c5), vorrq_u16(c6, c7)),
+        // All-pairs via rotations of BOTH operands (see intersect_merge_neon).
+        let vb1 = vextq_u16::<1>(vb, vb);
+        let vb2 = vextq_u16::<2>(vb, vb);
+        let vb3 = vextq_u16::<3>(vb, vb);
+        let va4 = vextq_u16::<4>(va, va);
+        let lo = vorrq_u16(
+            vorrq_u16(vceqq_u16(va, vb), vceqq_u16(va, vb1)),
+            vorrq_u16(vceqq_u16(va, vb2), vceqq_u16(va, vb3)),
         );
+        let hi = vorrq_u16(
+            vorrq_u16(vceqq_u16(va4, vb), vceqq_u16(va4, vb1)),
+            vorrq_u16(vceqq_u16(va4, vb2), vceqq_u16(va4, vb3)),
+        );
+        let m = vorrq_u16(lo, vextq_u16::<4>(hi, hi));
         matched |= vaddvq_u16(vandq_u16(m, weights)) as u32;
         let amax = vgetq_lane_u16::<7>(va);
         let bmax = vgetq_lane_u16::<7>(vb);
@@ -234,18 +236,20 @@ unsafe fn diff_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     let mut vb = _mm_loadu_si128(b.as_ptr().cast());
     let mut matched = 0u32;
     loop {
-        let c0 = _mm_cmpeq_epi16(va, vb);
-        let c1 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<2>(vb, vb));
-        let c2 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<4>(vb, vb));
-        let c3 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<6>(vb, vb));
-        let c4 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<8>(vb, vb));
-        let c5 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<10>(vb, vb));
-        let c6 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<12>(vb, vb));
-        let c7 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<14>(vb, vb));
-        let m = _mm_or_si128(
-            _mm_or_si128(_mm_or_si128(c0, c1), _mm_or_si128(c2, c3)),
-            _mm_or_si128(_mm_or_si128(c4, c5), _mm_or_si128(c6, c7)),
+        // All-pairs via rotations of BOTH operands (see intersect_merge_neon).
+        let vb1 = _mm_alignr_epi8::<2>(vb, vb);
+        let vb2 = _mm_alignr_epi8::<4>(vb, vb);
+        let vb3 = _mm_alignr_epi8::<6>(vb, vb);
+        let va4 = _mm_alignr_epi8::<8>(va, va);
+        let lo = _mm_or_si128(
+            _mm_or_si128(_mm_cmpeq_epi16(va, vb), _mm_cmpeq_epi16(va, vb1)),
+            _mm_or_si128(_mm_cmpeq_epi16(va, vb2), _mm_cmpeq_epi16(va, vb3)),
         );
+        let hi = _mm_or_si128(
+            _mm_or_si128(_mm_cmpeq_epi16(va4, vb), _mm_cmpeq_epi16(va4, vb1)),
+            _mm_or_si128(_mm_cmpeq_epi16(va4, vb2), _mm_cmpeq_epi16(va4, vb3)),
+        );
+        let m = _mm_or_si128(lo, _mm_alignr_epi8::<8>(hi, hi));
         matched |= (_mm_movemask_epi8(_mm_packs_epi16(m, m)) & 0xFF) as u32;
         let amax = _mm_extract_epi16::<7>(va) as u16;
         let bmax = _mm_extract_epi16::<7>(vb) as u16;

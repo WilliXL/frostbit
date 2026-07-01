@@ -7,7 +7,7 @@
 /// At or below this size ratio the arrays are balanced enough that the
 /// shuffle-merge's 8-at-a-time compare wins (one horizontal reduction per block,
 /// not per element). Above it, one side is "rare" — a scan of the larger wins.
-const MERGE_MAX_RATIO: usize = 4;
+pub(super) const MERGE_MAX_RATIO: usize = 4;
 
 /// `a ∩ b` for sorted, unique slices. Returns the result length.
 #[inline]
@@ -90,20 +90,23 @@ unsafe fn intersect_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     let mut va = vld1q_u16(a.as_ptr());
     let mut vb = vld1q_u16(b.as_ptr());
     loop {
-        // Per lane of `va`: does it equal any lane of `vb`? OR of 8 rotations,
-        // reduced as a tree to shorten the dependency chain.
-        let c0 = vceqq_u16(va, vb);
-        let c1 = vceqq_u16(va, vextq_u16::<1>(vb, vb));
-        let c2 = vceqq_u16(va, vextq_u16::<2>(vb, vb));
-        let c3 = vceqq_u16(va, vextq_u16::<3>(vb, vb));
-        let c4 = vceqq_u16(va, vextq_u16::<4>(vb, vb));
-        let c5 = vceqq_u16(va, vextq_u16::<5>(vb, vb));
-        let c6 = vceqq_u16(va, vextq_u16::<6>(vb, vb));
-        let c7 = vceqq_u16(va, vextq_u16::<7>(vb, vb));
-        let m = vorrq_u16(
-            vorrq_u16(vorrq_u16(c0, c1), vorrq_u16(c2, c3)),
-            vorrq_u16(vorrq_u16(c4, c5), vorrq_u16(c6, c7)),
+        // Per lane of `va`: does it equal any lane of `vb`? All 8 relative
+        // offsets via rotations of BOTH operands (Díez-Cañas): `va` and
+        // `rot4(va)` each meet 4 rotations of `vb` — offsets {0..3} ∪ {4..7} —
+        // then the rot4 group's mask is un-rotated. 5 permutes instead of 7.
+        let vb1 = vextq_u16::<1>(vb, vb);
+        let vb2 = vextq_u16::<2>(vb, vb);
+        let vb3 = vextq_u16::<3>(vb, vb);
+        let va4 = vextq_u16::<4>(va, va);
+        let lo = vorrq_u16(
+            vorrq_u16(vceqq_u16(va, vb), vceqq_u16(va, vb1)),
+            vorrq_u16(vceqq_u16(va, vb2), vceqq_u16(va, vb3)),
         );
+        let hi = vorrq_u16(
+            vorrq_u16(vceqq_u16(va4, vb), vceqq_u16(va4, vb1)),
+            vorrq_u16(vceqq_u16(va4, vb2), vceqq_u16(va4, vb3)),
+        );
+        let m = vorrq_u16(lo, vextq_u16::<4>(hi, hi));
         // Fold the per-lane mask to an 8-bit set, then emit matched `a` lanes.
         let mut bits = vaddvq_u16(vandq_u16(m, weights));
         while bits != 0 {
@@ -208,18 +211,20 @@ unsafe fn intersect_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     let mut va = _mm_loadu_si128(a.as_ptr().cast());
     let mut vb = _mm_loadu_si128(b.as_ptr().cast());
     loop {
-        let c0 = _mm_cmpeq_epi16(va, vb);
-        let c1 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<2>(vb, vb));
-        let c2 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<4>(vb, vb));
-        let c3 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<6>(vb, vb));
-        let c4 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<8>(vb, vb));
-        let c5 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<10>(vb, vb));
-        let c6 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<12>(vb, vb));
-        let c7 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<14>(vb, vb));
-        let m = _mm_or_si128(
-            _mm_or_si128(_mm_or_si128(c0, c1), _mm_or_si128(c2, c3)),
-            _mm_or_si128(_mm_or_si128(c4, c5), _mm_or_si128(c6, c7)),
+        // All-pairs via rotations of BOTH operands (see intersect_merge_neon).
+        let vb1 = _mm_alignr_epi8::<2>(vb, vb);
+        let vb2 = _mm_alignr_epi8::<4>(vb, vb);
+        let vb3 = _mm_alignr_epi8::<6>(vb, vb);
+        let va4 = _mm_alignr_epi8::<8>(va, va);
+        let lo = _mm_or_si128(
+            _mm_or_si128(_mm_cmpeq_epi16(va, vb), _mm_cmpeq_epi16(va, vb1)),
+            _mm_or_si128(_mm_cmpeq_epi16(va, vb2), _mm_cmpeq_epi16(va, vb3)),
         );
+        let hi = _mm_or_si128(
+            _mm_or_si128(_mm_cmpeq_epi16(va4, vb), _mm_cmpeq_epi16(va4, vb1)),
+            _mm_or_si128(_mm_cmpeq_epi16(va4, vb2), _mm_cmpeq_epi16(va4, vb3)),
+        );
+        let m = _mm_or_si128(lo, _mm_alignr_epi8::<8>(hi, hi));
         // Saturating-pack the 8 u16 lanes to bytes (0xFFFF→0xFF, 0→0), then a
         // byte movemask gives the 8-bit lane set.
         let mut bits = (_mm_movemask_epi8(_mm_packs_epi16(m, m)) & 0xFF) as u32;
