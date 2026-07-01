@@ -96,14 +96,33 @@ fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'
     let seed = (0..refs.len()).min_by_key(|&j| refs[j].card).unwrap();
 
     if refs[seed].card as usize <= ARRAY_MAX_SIZE {
-        let mut card = load_array(arena.slot_mut(i), refs[seed].typed());
+        // Array accumulator. The first array×array fold merges the source
+        // containers straight into the slot (one pass, no extraction); array
+        // merges after that ping-pong slot↔scratch (no staging copy); run and
+        // bitmap partners filter in place. At most one copy-back at the end.
+        let mut acc = ArrayAcc::new();
+        let mut first = true;
         for (j, p) in refs.iter().enumerate() {
-            if j == seed || card == 0 {
+            if j == seed {
                 continue;
             }
-            let (slot, scratch) = arena.slot_and_scratch(i);
-            card = array_intersect(slot, card, p.typed(), scratch);
+            if std::mem::take(&mut first) {
+                if let (Data::Array(sa), Data::Array(pa)) = (refs[seed].typed(), p.typed()) {
+                    acc.card = simd::array_intersect(sa, pa, acc_u16(arena.slot_mut(i))) as u32;
+                    continue;
+                }
+                acc.card = load_array(arena.slot_mut(i), refs[seed].typed());
+            }
+            if acc.card == 0 {
+                break;
+            }
+            acc.fold(arena, i, p.typed(), true);
         }
+        if first {
+            // Single-input intersect: the seed is the result.
+            acc.card = load_array(arena.slot_mut(i), refs[seed].typed());
+        }
+        let card = acc.finish(arena, i);
         arena.record(key, CT_ARRAY, card, i, card as usize * 2);
     } else if all_runs(refs) && total_runs(refs) <= MAX_RUNS {
         // Dense run containers stay runs (O(runs), not O(bitmap)).
@@ -183,11 +202,26 @@ fn union_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>])
         let card = card.unwrap_or_else(|| simd::popcount(dst));
         arena.record(key, CT_BITMAP, card, i, BITMAP_BYTES);
     } else {
-        let mut card = load_array(arena.slot_mut(i), refs[0].typed());
+        // Array accumulator (see intersect_key: direct first fold + ping-pong).
+        // Union has no in-place fold, so every partner is a merge; a non-array
+        // partner is extracted into the second scratch half first.
+        let mut acc = ArrayAcc::new();
+        let mut first = true;
         for p in &refs[1..] {
-            let (slot, scratch) = arena.slot_and_scratch(i);
-            card = array_union(slot, card, p.typed(), scratch);
+            if std::mem::take(&mut first) {
+                if let (Data::Array(a0), Data::Array(a1)) = (refs[0].typed(), p.typed()) {
+                    acc.card = simd::array_union(a0, a1, acc_u16(arena.slot_mut(i))) as u32;
+                    continue;
+                }
+                acc.card = load_array(arena.slot_mut(i), refs[0].typed());
+            }
+            acc.fold_union(arena, i, p.typed());
         }
+        if first {
+            // Single-input union: the input is the result.
+            acc.card = load_array(arena.slot_mut(i), refs[0].typed());
+        }
+        let card = acc.finish(arena, i);
         arena.record(key, CT_ARRAY, card, i, card as usize * 2);
     }
 }
@@ -246,14 +280,23 @@ fn diff_key(arena: &mut OpArena, i: usize, key: u16, lhs: &ContainerRef<'_>, rhs
     }
 
     if lhs.card as usize <= ARRAY_MAX_SIZE {
-        let mut card = load_array(arena.slot_mut(i), lhs.typed());
+        // Array accumulator (see intersect_key: direct first fold + ping-pong).
+        let mut acc = ArrayAcc::new();
+        let mut first = true;
         for p in rhs {
-            if card == 0 {
+            if std::mem::take(&mut first) {
+                if let (Data::Array(la), Data::Array(ra)) = (lhs.typed(), p.typed()) {
+                    acc.card = simd::array_diff(la, ra, acc_u16(arena.slot_mut(i))) as u32;
+                    continue;
+                }
+                acc.card = load_array(arena.slot_mut(i), lhs.typed());
+            }
+            if acc.card == 0 {
                 break;
             }
-            let (slot, scratch) = arena.slot_and_scratch(i);
-            card = array_diff(slot, card, p.typed(), scratch);
+            acc.fold(arena, i, p.typed(), false);
         }
+        let card = acc.finish(arena, i);
         arena.record(key, CT_ARRAY, card, i, card as usize * 2);
     } else if lhs.typ == CT_RUN && diff_run_bound(lhs, rhs).is_some_and(|n| n <= MAX_RUNS) {
         // Dense run minus runs/arrays stays a run container (split, no expand).
@@ -488,46 +531,88 @@ fn clear_into_count(dst: &mut Bitmap, data: Data<'_>) -> u32 {
     }
 }
 
-/// Array accumulator `∩= partner` (in place). `out` aliases the slot; `scratch`
-/// stages the accumulator for the two-pointer merge against array partners.
+/// The slot's bytes as a `u16` merge-output buffer.
 #[inline]
-fn array_intersect(slot: &mut [u8], card: u32, data: Data<'_>, scratch: &mut [u8]) -> u32 {
-    let acc: &mut [u16] = bytemuck::cast_slice_mut(slot);
-    match data {
-        Data::Array(b) => {
-            let tmp: &mut [u16] = bytemuck::cast_slice_mut(scratch);
-            tmp[..card as usize].copy_from_slice(&acc[..card as usize]);
-            simd::array_intersect(&tmp[..card as usize], b, acc) as u32
-        }
-        Data::Run(runs) => retain_runs(acc, card, runs, true),
-        _ => retain(acc, card, |lo| data.contains(lo)),
+fn acc_u16(slot: &mut [u8]) -> &mut [u16] {
+    bytemuck::cast_slice_mut(slot)
+}
+
+/// Array accumulator for one key's fold. Array×array merges ping-pong between
+/// the slot and the first scratch half (the merge kernels need `out` disjoint
+/// from both inputs, so flipping sides replaces a per-fold staging copy); run
+/// and bitmap partners filter in place. [`finish`](Self::finish) copies back at
+/// most once, whatever the arity.
+struct ArrayAcc {
+    card: u32,
+    in_scratch: bool,
+}
+
+impl ArrayAcc {
+    fn new() -> Self {
+        ArrayAcc { card: 0, in_scratch: false }
     }
-}
 
-/// Array accumulator `∪= partner` (sorted-merge through `scratch`).
-#[inline]
-fn array_union(slot: &mut [u8], card: u32, data: Data<'_>, scratch: &mut [u8]) -> u32 {
-    let acc: &mut [u16] = bytemuck::cast_slice_mut(slot);
-    let (a, b) = scratch.split_at_mut(BITMAP_BYTES);
-    let acc_tmp: &mut [u16] = bytemuck::cast_slice_mut(a);
-    acc_tmp[..card as usize].copy_from_slice(&acc[..card as usize]);
-    let partner: &mut [u16] = bytemuck::cast_slice_mut(b);
-    let pn = data.write_sorted(partner);
-    simd::array_union(&acc_tmp[..card as usize], &partner[..pn], acc) as u32
-}
-
-/// Array accumulator `\= partner` (in place).
-#[inline]
-fn array_diff(slot: &mut [u8], card: u32, data: Data<'_>, scratch: &mut [u8]) -> u32 {
-    let acc: &mut [u16] = bytemuck::cast_slice_mut(slot);
-    match data {
-        Data::Array(b) => {
-            let tmp: &mut [u16] = bytemuck::cast_slice_mut(scratch);
-            tmp[..card as usize].copy_from_slice(&acc[..card as usize]);
-            simd::array_diff(&tmp[..card as usize], b, acc) as u32
+    /// AND (`keep`) / DIFF (`!keep`) fold with one partner.
+    fn fold(&mut self, arena: &mut OpArena, i: usize, partner: Data<'_>, keep: bool) {
+        let (slot, scratch) = arena.slot_and_scratch(i);
+        let (sa, _) = scratch.split_at_mut(BITMAP_BYTES);
+        match partner {
+            Data::Array(b) => {
+                let kernel: fn(&[u16], &[u16], &mut [u16]) -> usize =
+                    if keep { simd::array_intersect } else { simd::array_diff };
+                self.merge(slot, sa, b, kernel);
+            }
+            Data::Run(runs) => {
+                let cur = if self.in_scratch { sa } else { slot };
+                self.card = retain_runs(acc_u16(cur), self.card, runs, keep);
+            }
+            _ => {
+                let cur = if self.in_scratch { sa } else { slot };
+                self.card = retain(acc_u16(cur), self.card, |lo| partner.contains(lo) == keep);
+            }
         }
-        Data::Run(runs) => retain_runs(acc, card, runs, false),
-        _ => retain(acc, card, |lo| !data.contains(lo)),
+    }
+
+    /// OR fold with one partner (always a merge; a non-array partner is
+    /// extracted into the second scratch half first).
+    fn fold_union(&mut self, arena: &mut OpArena, i: usize, partner: Data<'_>) {
+        let (slot, scratch) = arena.slot_and_scratch(i);
+        let (sa, sb) = scratch.split_at_mut(BITMAP_BYTES);
+        match partner {
+            Data::Array(b) => self.merge(slot, sa, b, simd::array_union),
+            _ => {
+                let staged: &mut [u16] = bytemuck::cast_slice_mut(sb);
+                let n = partner.write_sorted(staged);
+                self.merge(slot, sa, &staged[..n], simd::array_union);
+            }
+        }
+    }
+
+    /// Merge the accumulator with `b` into the other buffer and flip sides.
+    /// The output is bounded to its buffer, so a kernel's 8-lane block store
+    /// falls back to its scalar tail at the edge instead of spilling.
+    fn merge(
+        &mut self,
+        slot: &mut [u8],
+        sa: &mut [u8],
+        b: &[u16],
+        kernel: fn(&[u16], &[u16], &mut [u16]) -> usize,
+    ) {
+        let (src, dst): (&[u8], &mut [u8]) =
+            if self.in_scratch { (sa, slot) } else { (slot, sa) };
+        let src: &[u16] = &bytemuck::cast_slice(src)[..self.card as usize];
+        self.card = kernel(src, b, bytemuck::cast_slice_mut(dst)) as u32;
+        self.in_scratch = !self.in_scratch;
+    }
+
+    /// Land the accumulator in the slot (one copy iff it ended in scratch).
+    fn finish(self, arena: &mut OpArena, i: usize) -> u32 {
+        if self.in_scratch && self.card > 0 {
+            let n = self.card as usize * 2;
+            let (slot, scratch) = arena.slot_and_scratch(i);
+            slot[..n].copy_from_slice(&scratch[..n]);
+        }
+        self.card
     }
 }
 
