@@ -29,7 +29,7 @@ fn sweep(
             let fv = set.views(n);
             let rv = &set.rbs[..n];
             g.bench_function(format!("{regime}/{n}/frostbit"), |b| b.iter(|| black_box(fb_op(&fv))));
-            g.bench_function(format!("{regime}/{n}/roaring"), |b| b.iter(|| black_box(rb_op(rv))));
+            g.bench_function(format!("{regime}/{n}/{RB}"), |b| b.iter(|| black_box(rb_op(rv))));
         }
     }
     g.finish();

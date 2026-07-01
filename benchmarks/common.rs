@@ -1,15 +1,18 @@
 //! Shared benchmark helpers: deterministic inputs and matched frozen/roaring
-//! sets, so every bench compares the two engines on identical data.
+//! sets, so every bench compares the engines on identical data.
 //!
-//! CAVEAT — fairness: `roaring`'s `simd` feature is nightly-only
-//! (`#![feature(portable_simd)]`) and off by default, so on a stable toolchain
-//! roaring runs **scalar** while frostbit uses hand-written SIMD. These numbers
-//! therefore flatter frostbit on bitmap-dense work; for a SIMD-vs-SIMD
-//! comparison, build on nightly with `roaring`'s `simd` feature enabled.
+//! roaring's `simd` feature is nightly-only and off by default, so it is a
+//! *distinct competitor*: bench IDs carry the variant ([`RB`]), and
+//! `benchmarks/run.sh` runs both feature sets into one criterion directory,
+//! which `benchmarks/report.py` renders as combined tables.
 #![allow(dead_code)]
 
 use frostbit::{FrozenBitmap, FrozenBitmapView};
 use roaring::RoaringBitmap;
+
+/// Bench-ID label for the roaring competitor in this build: its scalar default
+/// or its nightly `simd` kernels, depending on the compiled feature set.
+pub const RB: &str = if cfg!(feature = "roaring-simd") { "roaring-simd" } else { "roaring" };
 
 pub fn splitmix64(s: &mut u64) -> u64 {
     *s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);

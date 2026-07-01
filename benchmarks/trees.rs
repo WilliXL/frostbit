@@ -178,7 +178,7 @@ fn bench(c: &mut Criterion) {
         g.bench_function(format!("{name}/frostbit"), |b| {
             b.iter(|| black_box(expr.materialize()))
         });
-        g.bench_function(format!("{name}/roaring"), |b| {
+        g.bench_function(format!("{name}/{RB}"), |b| {
             b.iter(|| black_box(eval_rb(black_box(spec), &pool)))
         });
     }
@@ -205,7 +205,7 @@ fn bench(c: &mut Criterion) {
     let mut h = c.benchmark_group("holepunch");
     h.bench_function("selective/frostbit", |b| b.iter(|| black_box(unpunched.materialize())));
     h.bench_function("selective/frostbit_punched", |b| b.iter(|| black_box(punched.materialize())));
-    h.bench_function("selective/roaring", |b| {
+    h.bench_function(format!("selective/{RB}"), |b| {
         b.iter(|| black_box(eval_rb(black_box(&sel_spec), &sel)))
     });
     h.finish();
@@ -224,7 +224,7 @@ fn bench(c: &mut Criterion) {
     let sc_fb = build_fb(&sc_spec, &sc);
     let mut s = c.benchmark_group("shortcircuit");
     s.bench_function("empty_and/frostbit", |b| b.iter(|| black_box(sc_fb.materialize())));
-    s.bench_function("empty_and/roaring", |b| b.iter(|| black_box(eval_rb(black_box(&sc_spec), &sc))));
+    s.bench_function(format!("empty_and/{RB}"), |b| b.iter(|| black_box(eval_rb(black_box(&sc_spec), &sc))));
     s.finish();
 }
 
