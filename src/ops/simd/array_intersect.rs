@@ -76,21 +76,29 @@ fn intersect_gallop(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
 #[target_feature(enable = "neon")]
 unsafe fn intersect_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     use std::arch::aarch64::*;
+    let (na, nb) = (a.len(), b.len());
     let (mut ia, mut ib, mut k) = (0usize, 0usize, 0usize);
     const LANE_BIT: [u16; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
     let weights = vld1q_u16(LANE_BIT.as_ptr());
-    while ia + 8 <= a.len() && ib + 8 <= b.len() {
-        let va = vld1q_u16(a.as_ptr().add(ia));
-        let vb = vld1q_u16(b.as_ptr().add(ib));
-        // Per lane of `va`: does it equal any lane of `vb`? OR of 8 rotations.
-        let mut m = vceqq_u16(va, vb);
-        m = vorrq_u16(m, vceqq_u16(va, vextq_u16::<1>(vb, vb)));
-        m = vorrq_u16(m, vceqq_u16(va, vextq_u16::<2>(vb, vb)));
-        m = vorrq_u16(m, vceqq_u16(va, vextq_u16::<3>(vb, vb)));
-        m = vorrq_u16(m, vceqq_u16(va, vextq_u16::<4>(vb, vb)));
-        m = vorrq_u16(m, vceqq_u16(va, vextq_u16::<5>(vb, vb)));
-        m = vorrq_u16(m, vceqq_u16(va, vextq_u16::<6>(vb, vb)));
-        m = vorrq_u16(m, vceqq_u16(va, vextq_u16::<7>(vb, vb)));
+    // Keep both 8-lane blocks live across iterations, reloading only the side we
+    // advance (the caller guarantees na, nb >= 8).
+    let mut va = vld1q_u16(a.as_ptr());
+    let mut vb = vld1q_u16(b.as_ptr());
+    loop {
+        // Per lane of `va`: does it equal any lane of `vb`? OR of 8 rotations,
+        // reduced as a tree to shorten the dependency chain.
+        let c0 = vceqq_u16(va, vb);
+        let c1 = vceqq_u16(va, vextq_u16::<1>(vb, vb));
+        let c2 = vceqq_u16(va, vextq_u16::<2>(vb, vb));
+        let c3 = vceqq_u16(va, vextq_u16::<3>(vb, vb));
+        let c4 = vceqq_u16(va, vextq_u16::<4>(vb, vb));
+        let c5 = vceqq_u16(va, vextq_u16::<5>(vb, vb));
+        let c6 = vceqq_u16(va, vextq_u16::<6>(vb, vb));
+        let c7 = vceqq_u16(va, vextq_u16::<7>(vb, vb));
+        let m = vorrq_u16(
+            vorrq_u16(vorrq_u16(c0, c1), vorrq_u16(c2, c3)),
+            vorrq_u16(vorrq_u16(c4, c5), vorrq_u16(c6, c7)),
+        );
         // Fold the per-lane mask to an 8-bit set, then emit matched `a` lanes.
         let mut bits = vaddvq_u16(vandq_u16(m, weights));
         while bits != 0 {
@@ -99,10 +107,24 @@ unsafe fn intersect_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
             k += 1;
             bits &= bits - 1;
         }
-        let amax = *a.get_unchecked(ia + 7);
-        let bmax = *b.get_unchecked(ib + 7);
-        ia += usize::from(amax <= bmax) << 3;
-        ib += usize::from(bmax <= amax) << 3;
+        // Advance the block whose max is smaller (both on a tie); take maxes from
+        // the live registers, and reload only the advanced side.
+        let amax = vgetq_lane_u16::<7>(va);
+        let bmax = vgetq_lane_u16::<7>(vb);
+        if amax <= bmax {
+            ia += 8;
+            if ia + 8 > na {
+                break;
+            }
+            va = vld1q_u16(a.as_ptr().add(ia));
+        }
+        if bmax <= amax {
+            ib += 8;
+            if ib + 8 > nb {
+                break;
+            }
+            vb = vld1q_u16(b.as_ptr().add(ib));
+        }
     }
     k + intersect_scalar(&a[ia..], &b[ib..], &mut out[k..])
 }
