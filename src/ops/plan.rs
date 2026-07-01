@@ -31,6 +31,10 @@ pub struct Plan {
     pub slots: Vec<SlotPlan>,
     /// Fixed working scratch (a bitmap + a run double-buffer), allocated once.
     pub scratch_bytes: usize,
+    /// Allocate a second slot region: the op folds partner-major and its array
+    /// merges flip a per-slot side bit between the two (out ≠ in without a
+    /// staging copy, while every pass streams its inputs sequentially).
+    pub double: bool,
 }
 
 /// Scratch the kernels need: one bitmap accumulator + one run/bitmap temp.
@@ -84,7 +88,7 @@ fn shrink_slot_bytes(card: u32) -> u32 {
 pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = Vec::new();
     if inputs.is_empty() {
-        return Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES };
+        return Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES, double: false };
     }
     let mut cursors: Vec<ContainerCursor<'_>> = (0..inputs.len()).map(|i| inputs.cursor(i)).collect();
 
@@ -103,7 +107,7 @@ pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
             slots.push(SlotPlan { key, capacity: shrink_slot_bytes(min_card) });
         }
     }
-    Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES }
+    Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES, double: false }
 }
 
 /// OR: output keys = ∪ of all inputs' keys. Per key the slot must hold the
@@ -114,7 +118,7 @@ pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
 pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = Vec::new();
     if inputs.is_empty() {
-        return Plan { op: Op::Union, slots, scratch_bytes: SCRATCH_BYTES };
+        return Plan { op: Op::Union, slots, scratch_bytes: SCRATCH_BYTES, double: false };
     }
     let mut cursors: Vec<ContainerCursor<'_>> = (0..inputs.len()).map(|i| inputs.cursor(i)).collect();
 
@@ -145,7 +149,7 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
         } as u32;
         slots.push(SlotPlan { key, capacity });
     }
-    Plan { op: Op::Union, slots, scratch_bytes: SCRATCH_BYTES }
+    Plan { op: Op::Union, slots, scratch_bytes: SCRATCH_BYTES, double: false }
 }
 
 /// DIFF: `inputs[0]` (A) minus the rest. Output keys = A's keys (the RHS can
@@ -155,7 +159,7 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
 pub fn plan_diff<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = Vec::new();
     if inputs.is_empty() {
-        return Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES };
+        return Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES, double: true };
     }
     let mut a = inputs.cursor(0);
     let mut rhs: Vec<ContainerCursor<'_>> = (1..inputs.len()).map(|i| inputs.cursor(i)).collect();
@@ -171,7 +175,7 @@ pub fn plan_diff<I: Inputs + ?Sized>(inputs: &I) -> Plan {
         slots.push(SlotPlan { key, capacity });
         a.advance();
     }
-    Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES }
+    Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES, double: true }
 }
 
 /// Smallest current key across cursors, or `None` when all are exhausted.

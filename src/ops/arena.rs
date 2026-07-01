@@ -5,6 +5,11 @@
 //! slots. `record` debug-asserts each container fits its slot, turning a
 //! planner bug into a test failure rather than a silent runtime allocation.
 //!
+//! A double-buffered plan (see [`Plan::double`]) lays a mirror region after the
+//! slots: partner-major folds flip each slot between its two sides so array
+//! merges get `out ≠ in` with no staging copy, while every pass streams its
+//! input leaf sequentially.
+//!
 //! The working buffer and index vectors are reused across ops via a small
 //! thread-local pool (see [`pool`]), so steady-state `intersect`/`union`/`diff`
 //! allocate only their result.
@@ -19,8 +24,31 @@ struct OutEntry {
     key: u16,
     typ: u8,
     card: u32,
-    slot_idx: usize,
+    /// Side-resolved payload offset in the arena buffer.
+    off: u32,
     data_size: u32,
+}
+
+/// Per-slot accumulator state for a partner-major fold: the container form the
+/// slot currently holds, which side of the double buffer it lives on, and its
+/// running run-count / cardinality. `typ == UNSEEDED` marks untouched slots;
+/// `card == CARD_LAZY` marks a bitmap whose count is deferred to finalize.
+#[derive(Clone, Copy)]
+pub(crate) struct SlotState {
+    pub typ: u8,
+    pub side: u8,
+    pub runs: u16,
+    pub card: u32,
+}
+
+impl SlotState {
+    pub const UNSEEDED: u8 = u8::MAX;
+    pub const CARD_LAZY: u32 = u32::MAX;
+
+    #[inline]
+    pub fn seeded(&self) -> bool {
+        self.typ != Self::UNSEEDED
+    }
 }
 
 /// The poolable, reusable allocations of an arena.
@@ -29,6 +57,7 @@ struct Reusable {
     slot_off: Vec<u32>,
     slot_sz: Vec<u32>,
     slot_key: Vec<u16>,
+    state: Vec<SlotState>,
     out: Vec<OutEntry>,
 }
 
@@ -39,13 +68,14 @@ impl Default for Reusable {
             slot_off: Vec::new(),
             slot_sz: Vec::new(),
             slot_key: Vec::new(),
+            state: Vec::new(),
             out: Vec::new(),
         }
     }
 }
 
 /// Thread-local reuse of arena working memory. A small stack handles the
-/// nesting that the (future) expression-tree evaluator introduces.
+/// nesting that the expression-tree evaluator introduces.
 mod pool {
     use std::cell::RefCell;
 
@@ -75,7 +105,11 @@ pub struct OpArena {
     slot_off: Vec<u32>,
     slot_sz: Vec<u32>,
     slot_key: Vec<u16>,
+    state: Vec<SlotState>,
     out: Vec<OutEntry>,
+    /// Byte distance from a slot's side-A offset to its side-B mirror (0 when
+    /// the plan is single-buffered).
+    stride: usize,
     scratch_off: usize,
     next_slot: usize,
     total_card: u64,
@@ -90,6 +124,7 @@ impl Drop for OpArena {
             slot_off: std::mem::take(&mut self.slot_off),
             slot_sz: std::mem::take(&mut self.slot_sz),
             slot_key: std::mem::take(&mut self.slot_key),
+            state: std::mem::take(&mut self.state),
             out: std::mem::take(&mut self.out),
         });
     }
@@ -99,10 +134,12 @@ impl OpArena {
     /// Size a (pooled) buffer for every planned slot + fixed scratch. Bitmap-
     /// capacity slots and the scratch land on 64-byte boundaries for SIMD.
     pub fn from_plan(plan: &Plan) -> Self {
-        let Reusable { mut buf, mut slot_off, mut slot_sz, mut slot_key, mut out } = pool::take();
+        let Reusable { mut buf, mut slot_off, mut slot_sz, mut slot_key, mut state, mut out } =
+            pool::take();
         slot_off.clear();
         slot_sz.clear();
         slot_key.clear();
+        state.clear();
         out.clear();
 
         // Reserve worst-case header + index room up front, so `serialize` can
@@ -117,7 +154,13 @@ impl OpArena {
             slot_key.push(s.key);
             cursor += s.capacity as usize;
         }
-        let scratch_off = align_up(cursor, BUF_ALIGN);
+        state.resize(
+            plan.num_slots(),
+            SlotState { typ: SlotState::UNSEEDED, side: 0, runs: 0, card: 0 },
+        );
+        // A 64-byte-aligned stride keeps side-B bitmap slots cache-aligned too.
+        let stride = if plan.double { align_up(cursor, BUF_ALIGN) } else { 0 };
+        let scratch_off = align_up(cursor + stride, BUF_ALIGN);
         let total = scratch_off + plan.scratch_bytes;
 
         // Reuse the pooled buffer's capacity, leaving the bytes uninitialized.
@@ -134,7 +177,9 @@ impl OpArena {
             slot_off,
             slot_sz,
             slot_key,
+            state,
             out,
+            stride,
             scratch_off,
             next_slot: 0,
             total_card: 0,
@@ -168,24 +213,69 @@ impl OpArena {
         self.slot_sz[i] as usize
     }
 
-    /// Writable bytes of slot `i` (full capacity).
+    /// The planned key of slot `i` (partner-major passes pair cursors to it).
+    #[inline]
+    pub(crate) fn planned_key(&self, i: usize) -> u16 {
+        self.slot_key[i]
+    }
+
+    #[inline]
+    pub(crate) fn state(&self, i: usize) -> SlotState {
+        self.state[i]
+    }
+
+    #[inline]
+    pub(crate) fn state_mut(&mut self, i: usize) -> &mut SlotState {
+        &mut self.state[i]
+    }
+
+    /// Byte offset of slot `i`'s current side.
+    #[inline]
+    fn cur_off(&self, i: usize) -> usize {
+        self.slot_off[i] as usize + self.state[i].side as usize * self.stride
+    }
+
+    /// Writable bytes of slot `i` (full capacity, current side).
     #[inline]
     pub fn slot_mut(&mut self, i: usize) -> &mut [u8] {
-        let off = self.slot_off[i] as usize;
+        let off = self.cur_off(i);
         let sz = self.slot_sz[i] as usize;
         &mut self.buf[off..off + sz]
     }
 
-    /// Slot `i` and the scratch region as disjoint mutable slices.
+    /// Slot `i` (current side) and the scratch region as disjoint mut slices.
     #[inline]
     pub fn slot_and_scratch(&mut self, i: usize) -> (&mut [u8], &mut [u8]) {
-        let off = self.slot_off[i] as usize;
+        let off = self.cur_off(i);
         let sz = self.slot_sz[i] as usize;
         let (front, scratch) = self.buf.split_at_mut(self.scratch_off);
         (&mut front[off..off + sz], scratch)
     }
 
-    /// Record a produced container in slot `i`. Skips empty results.
+    /// Slot `i`'s two sides as `(current, other)` disjoint mut slices, for a
+    /// merge whose output must not alias its input. Flip with
+    /// [`flip_side`](Self::flip_side) after writing `other`.
+    #[inline]
+    pub(crate) fn slot_pair(&mut self, i: usize) -> (&mut [u8], &mut [u8]) {
+        debug_assert!(self.stride > 0, "slot_pair needs a double-buffered plan");
+        let a = self.slot_off[i] as usize;
+        let b = a + self.stride;
+        let sz = self.slot_sz[i] as usize;
+        let (lo, hi) = self.buf.split_at_mut(b);
+        let (a_sl, b_sl) = (&mut lo[a..a + sz], &mut hi[..sz]);
+        if self.state[i].side == 0 {
+            (a_sl, b_sl)
+        } else {
+            (b_sl, a_sl)
+        }
+    }
+
+    #[inline]
+    pub(crate) fn flip_side(&mut self, i: usize) {
+        self.state[i].side ^= 1;
+    }
+
+    /// Record a produced container in slot `i` (current side). Skips empties.
     pub fn record(&mut self, key: u16, typ: u8, card: u32, i: usize, data_size: usize) {
         if card == 0 {
             return;
@@ -198,7 +288,8 @@ impl OpArena {
         self.has_runs |= typ == CT_RUN;
         self.has_bitmap |= typ == CT_BITMAP;
         self.total_card += card as u64;
-        self.out.push(OutEntry { key, typ, card, slot_idx: i, data_size: data_size as u32 });
+        let off = self.cur_off(i) as u32;
+        self.out.push(OutEntry { key, typ, card, off, data_size: data_size as u32 });
     }
 
     #[inline]
@@ -229,7 +320,7 @@ impl OpArena {
     #[inline]
     pub(crate) fn container_ref(&self, i: usize) -> ContainerRef<'_> {
         let e = &self.out[i];
-        let off = self.slot_off[e.slot_idx] as usize;
+        let off = e.off as usize;
         ContainerRef {
             key: e.key,
             typ: e.typ,
@@ -257,10 +348,12 @@ impl OpArena {
 
     /// Serialize **in place**: payloads are compacted leftward inside the
     /// arena's own buffer (slots were laid past a reserved header+index front,
-    /// and each capacity ≥ its payload, so every destination ≤ its source), the
-    /// header and index land in the reserved front, and the buffer itself
-    /// becomes the result — the fold's writes were the output's writes. A
-    /// buffer from the result pool is swapped in so the pools stay balanced.
+    /// and each capacity ≥ its payload, so every destination ≤ its source —
+    /// side-B payloads sit past the whole side-A region, so the bound holds for
+    /// them a fortiori), the header and index land in the reserved front, and
+    /// the buffer itself becomes the result — the fold's writes were the
+    /// output's writes. A buffer from the result pool is swapped in so the
+    /// pools stay balanced.
     fn serialize_inner(mut self, compact: bool) -> FrozenBitmap {
         self.out.sort_unstable_by_key(|e| e.key);
         let n = self.out.len();
@@ -272,9 +365,10 @@ impl OpArena {
             for j in 0..n {
                 let e = &self.out[j];
                 if e.typ == CT_BITMAP && e.card as usize <= ARRAY_MAX_SIZE {
-                    let (card, i) = (e.card, e.slot_idx);
+                    let (card, off) = (e.card, e.off as usize);
                     let bytes = card as usize * 2;
-                    let (slot, scratch) = self.slot_and_scratch(i);
+                    let (front, scratch) = self.buf.split_at_mut(self.scratch_off);
+                    let slot = &mut front[off..off + BITMAP_BYTES];
                     let w = Data::new(CT_BITMAP, card, &slot[..BITMAP_BYTES])
                         .write_sorted(bytemuck::cast_slice_mut(scratch));
                     debug_assert_eq!(w, card as usize);
@@ -295,13 +389,13 @@ impl OpArena {
 
         // Compact payloads leftward, writing each index entry as its payload
         // lands and zeroing the alignment gap before it. Records ascend by key
-        // and slots were claimed in key order, so source offsets ascend too and
-        // never precede their destinations.
+        // and slots were claimed in key order, so source offsets never precede
+        // their destinations.
         let (mut dc, mut prev_end) = (0usize, data_base);
         for j in 0..n {
             let e = &self.out[j];
             let (key, typ, card, size) = (e.key, e.typ, e.card, e.data_size as usize);
-            let src = self.slot_off[e.slot_idx] as usize;
+            let src = e.off as usize;
             let align = if typ == CT_BITMAP { BUF_ALIGN } else { 2 };
             dc = align_up(dc, align);
             let dst = data_base + dc;

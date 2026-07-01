@@ -73,6 +73,7 @@ pub fn to_plan(op: Op, shape: &Shape) -> Plan {
         op,
         slots: shape.iter().map(|m| SlotPlan { key: m.key, capacity: m.cap }).collect(),
         scratch_bytes: 2 * BITMAP_BYTES,
+        double: op == Op::Diff,
     }
 }
 
