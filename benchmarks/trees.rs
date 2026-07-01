@@ -148,6 +148,114 @@ fn named() -> Vec<(&'static str, Spec)> {
     ]
 }
 
+/// Per-tree shape profile for the corpus: each tree draws its own leafiness,
+/// op mix, and node-width distribution, so the corpus spans deep AND-chains,
+/// flat 100-way ORs, diff-heavy filters, and everything between.
+struct Profile {
+    leaf_pct: u64,
+    diff_pct: u64,
+    or_pct: u64,
+    wide: bool,
+}
+
+/// One random tree under `budget` total leaves and `depth` remaining levels.
+fn gen_profiled(st: &mut u64, budget: usize, depth: usize, prof: &Profile, n: usize) -> Spec {
+    if budget <= 1 || depth == 0 || splitmix64(st) % 100 < prof.leaf_pct {
+        return leaf((splitmix64(st) as usize) % n);
+    }
+    let r = splitmix64(st) % 100;
+    if r < prof.diff_pct {
+        let l = 1 + (splitmix64(st) as usize) % (budget - 1);
+        return diff(
+            gen_profiled(st, l, depth - 1, prof, n),
+            gen_profiled(st, budget - l, depth - 1, prof, n),
+        );
+    }
+    // Node width: mostly narrow, occasionally very wide (up to the full budget).
+    let max_w = if prof.wide && splitmix64(st) % 8 == 0 { budget } else { 2 + budget.min(6) };
+    let w = 2 + (splitmix64(st) as usize) % (max_w.min(budget).max(2) - 1);
+    // Split the leaf budget unevenly across children (colliding cuts collapse,
+    // so the total leaf count never exceeds the budget).
+    let mut cuts: Vec<usize> = (0..w - 1).map(|_| 1 + (splitmix64(st) as usize) % budget).collect();
+    cuts.sort_unstable();
+    let mut kids = Vec::with_capacity(w);
+    let mut prev = 0usize;
+    for &cut in cuts.iter().chain(std::iter::once(&budget)) {
+        if cut > prev {
+            kids.push(gen_profiled(st, cut - prev, depth - 1, prof, n));
+            prev = cut;
+        }
+    }
+    if kids.len() == 1 {
+        return kids.pop().unwrap();
+    }
+    if r < prof.diff_pct + prof.or_pct {
+        or(kids)
+    } else {
+        and(kids)
+    }
+}
+
+/// The 25k-tree corpus: up to 100 leaves and 15 levels per tree, deterministic.
+fn corpus_specs(n_trees: usize, pool_len: usize) -> Vec<Spec> {
+    let mut st = 0xC0_2b_05_2026_u64;
+    (0..n_trees)
+        .map(|_| {
+            // Log-ish spread of sizes: plenty of small trees, a long large tail.
+            let budget = match splitmix64(&mut st) % 10 {
+                0..=4 => 2 + (splitmix64(&mut st) as usize) % 9, // 2..=10
+                5..=7 => 10 + (splitmix64(&mut st) as usize) % 31, // 10..=40
+                _ => 40 + (splitmix64(&mut st) as usize) % 61,   // 40..=100
+            };
+            let depth = 2 + (splitmix64(&mut st) as usize) % 14; // 2..=15
+            let prof = Profile {
+                leaf_pct: splitmix64(&mut st) % 45,
+                diff_pct: splitmix64(&mut st) % 35,
+                or_pct: 20 + splitmix64(&mut st) % 60,
+                wide: splitmix64(&mut st) % 3 == 0,
+            };
+            gen_profiled(&mut st, budget, depth, &prof, pool_len)
+        })
+        .collect()
+}
+
+/// Whole-corpus throughput: evaluate all 25k trees per iteration (frostbit
+/// builds + analyzes + materializes each tree inside the timed region, exactly
+/// what a query engine pays per query; roaring re-evaluates recursively).
+fn corpus(c: &mut Criterion) {
+    let pool = mixed_pool();
+    let specs = corpus_specs(25_000, pool.len());
+    let total_leaves: usize = specs.iter().map(count_leaves).sum();
+
+    // Parity spot-check across the corpus (every 64th tree).
+    for (i, spec) in specs.iter().enumerate().step_by(64) {
+        let got = fb_vec(&build_fb(spec, &pool).materialize());
+        let want = rb_vec(&eval_rb(spec, &pool));
+        assert_eq!(got, want, "frostbit≠roaring in corpus tree {i}");
+    }
+
+    let mut g = c.benchmark_group("corpus");
+    g.sample_size(10);
+    g.warm_up_time(Duration::from_secs(2));
+    g.measurement_time(Duration::from_secs(20));
+    g.throughput(criterion::Throughput::Elements(specs.len() as u64));
+    g.bench_function(format!("25k_trees_{total_leaves}leaves/frostbit"), |b| {
+        b.iter(|| {
+            for spec in &specs {
+                black_box(build_fb(spec, &pool).materialize());
+            }
+        })
+    });
+    g.bench_function(format!("25k_trees_{total_leaves}leaves/{RB}"), |b| {
+        b.iter(|| {
+            for spec in &specs {
+                black_box(eval_rb(spec, &pool));
+            }
+        })
+    });
+    g.finish();
+}
+
 fn bench(c: &mut Criterion) {
     let pool = mixed_pool();
 
@@ -234,6 +342,6 @@ criterion_group! {
         .sample_size(30)
         .warm_up_time(Duration::from_millis(1200))
         .measurement_time(Duration::from_secs(4));
-    targets = bench
+    targets = bench, corpus
 }
 criterion_main!(benches);
