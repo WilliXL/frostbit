@@ -105,7 +105,10 @@ impl OpArena {
         slot_key.clear();
         out.clear();
 
-        let mut cursor = 0usize;
+        // Reserve worst-case header + index room up front, so `serialize` can
+        // compact payloads leftward in place and emit this very buffer as the
+        // result — the fold writes directly into what becomes the output.
+        let mut cursor = data_section_off(plan.num_slots(), true);
         for s in &plan.slots {
             let align = if s.capacity as usize == BITMAP_BYTES { BUF_ALIGN } else { WORD_ALIGN };
             cursor = align_up(cursor, align);
@@ -252,46 +255,67 @@ impl OpArena {
         self.serialize_inner(true)
     }
 
+    /// Serialize **in place**: payloads are compacted leftward inside the
+    /// arena's own buffer (slots were laid past a reserved header+index front,
+    /// and each capacity ≥ its payload, so every destination ≤ its source), the
+    /// header and index land in the reserved front, and the buffer itself
+    /// becomes the result — the fold's writes were the output's writes. A
+    /// buffer from the result pool is swapped in so the pools stay balanced.
     fn serialize_inner(mut self, compact: bool) -> FrozenBitmap {
         self.out.sort_unstable_by_key(|e| e.key);
         let n = self.out.len();
 
-        // Output encoding per container. Compaction may turn a sparse bitmap
-        // into an array, which also drops `has_bitmap` (changing index align).
-        let mut typs = Vec::with_capacity(n);
-        let mut sizes = Vec::with_capacity(n);
+        // Compact transcodes (sparse bitmap → array) bounce through scratch
+        // first — an overlapping in-place bit extraction would clobber unread
+        // words. Sizes only shrink, preserving the compaction invariant.
+        if compact {
+            for j in 0..n {
+                let e = &self.out[j];
+                if e.typ == CT_BITMAP && e.card as usize <= ARRAY_MAX_SIZE {
+                    let (card, i) = (e.card, e.slot_idx);
+                    let bytes = card as usize * 2;
+                    let (slot, scratch) = self.slot_and_scratch(i);
+                    let w = Data::new(CT_BITMAP, card, &slot[..BITMAP_BYTES])
+                        .write_sorted(bytemuck::cast_slice_mut(scratch));
+                    debug_assert_eq!(w, card as usize);
+                    slot[..bytes].copy_from_slice(&scratch[..bytes]);
+                    let e = &mut self.out[j];
+                    e.typ = CT_ARRAY;
+                    e.data_size = bytes as u32;
+                }
+            }
+        }
+
         let (mut has_bitmap, mut has_runs) = (false, false);
         for e in &self.out {
-            let (typ, size) = if compact && e.typ == CT_BITMAP && e.card as usize <= ARRAY_MAX_SIZE {
-                (CT_ARRAY, e.card as usize * 2)
-            } else {
-                (e.typ, e.data_size as usize)
-            };
-            has_bitmap |= typ == CT_BITMAP;
-            has_runs |= typ == CT_RUN;
-            typs.push(typ);
-            sizes.push(size);
+            has_bitmap |= e.typ == CT_BITMAP;
+            has_runs |= e.typ == CT_RUN;
         }
-
         let data_base = data_section_off(n, has_bitmap);
 
-        // Output payload offsets: bitmaps 64-aligned, else 2-aligned (matches
-        // the builder, so `_fast` output is byte-identical for the same set).
-        let mut offsets = Vec::with_capacity(n);
-        let mut dc = 0usize;
-        for i in 0..n {
-            let align = if typs[i] == CT_BITMAP { BUF_ALIGN } else { 2 };
+        // Compact payloads leftward, writing each index entry as its payload
+        // lands and zeroing the alignment gap before it. Records ascend by key
+        // and slots were claimed in key order, so source offsets ascend too and
+        // never precede their destinations.
+        let (mut dc, mut prev_end) = (0usize, data_base);
+        for j in 0..n {
+            let e = &self.out[j];
+            let (key, typ, card, size) = (e.key, e.typ, e.card, e.data_size as usize);
+            let src = self.slot_off[e.slot_idx] as usize;
+            let align = if typ == CT_BITMAP { BUF_ALIGN } else { 2 };
             dc = align_up(dc, align);
-            offsets.push(dc);
-            dc += sizes[i];
+            let dst = data_base + dc;
+            debug_assert!(dst <= src, "in-place compaction must move left");
+            let entry = IndexEntry { key, typ, cardinality: card, data_offset: dc as u32 };
+            write_index_entry(&mut self.buf, n, j, entry);
+            self.buf[prev_end..dst].fill(0);
+            if dst != src {
+                self.buf.copy_within(src..src + size, dst);
+            }
+            prev_end = dst + size;
+            dc += size;
         }
         let total = data_base + dc;
-
-        // The result buffer is filled completely below — header, index, the
-        // alignment gaps, and every payload — so we skip the initial memset.
-        // SAFETY: `u8` needs no init and no byte is read before being written.
-        let mut buf = result_buf(total);
-        unsafe { buf.set_len(total) };
 
         Header {
             has_runs,
@@ -299,39 +323,13 @@ impl OpArena {
             num_containers: n as u32,
             cardinality: self.total_card,
         }
-        .write(&mut buf);
+        .write(&mut self.buf);
+        self.buf[HEADER_SIZE + index_size(n)..data_base].fill(0);
+        self.buf.truncate(total);
 
-        for (i, e) in self.out.iter().enumerate() {
-            write_index_entry(
-                &mut buf,
-                n,
-                i,
-                IndexEntry { key: e.key, typ: typs[i], cardinality: e.card, data_offset: offsets[i] as u32 },
-            );
-        }
-
-        // Zero the gap between the index and the data section, then write each
-        // payload, zeroing the alignment padding that precedes it. This leaves
-        // the output byte-identical to a zero-initialized buffer.
-        buf[HEADER_SIZE + index_size(n)..data_base].fill(0);
-        let mut written = 0usize;
-        for (i, e) in self.out.iter().enumerate() {
-            let off = offsets[i];
-            buf[data_base + written..data_base + off].fill(0);
-            let src = self.slot_off[e.slot_idx] as usize;
-            let size = sizes[i];
-            let dst = data_base + off;
-            if typs[i] == e.typ {
-                buf[dst..dst + size].copy_from_slice(&self.buf[src..src + size]);
-            } else {
-                // Compacted bitmap → array: extract set bits as sorted u16s.
-                let bm = Data::new(CT_BITMAP, e.card, &self.buf[src..src + BITMAP_BYTES]);
-                let w = bm.write_sorted(bytemuck::cast_slice_mut(&mut buf[dst..dst + size]));
-                debug_assert_eq!(w, e.card as usize);
-            }
-            written = off + size;
-        }
-        buf[data_base + written..total].fill(0);
+        // Hand this buffer out as the result; swap in one from the result pool
+        // so the arena pool gets a buffer back (they circulate, no malloc).
+        let buf = std::mem::replace(&mut self.buf, result_buf(0));
         FrozenBitmap::from_buf(buf)
     }
 }
