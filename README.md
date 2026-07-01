@@ -29,7 +29,10 @@ assert_eq!(v.len(), 3);
 - **Statically-planned set operations.** `intersect_fast`, `union_fast`, and
   `difference_fast` size their working arena from an up-front analysis pass that
   proves each output container's capacity — so execution **never allocates a
-  container at runtime** (no grow, no realloc).
+  container at runtime** (no grow, no realloc). Results **serialize in place**:
+  the arena reserves header room up front and payloads compact leftward, so the
+  fold writes directly into what becomes the output buffer, and all working +
+  result buffers cycle through per-thread pools (zero steady-state mallocs).
 - **Boolean expression trees.** `BitmapExpr` combines leaves with AND / OR / DIFF
   and evaluates them from a fold plan built **once** at construction: same-op
   chains flatten to one N-way op, intermediates chain as pooled arenas
@@ -93,7 +96,7 @@ frostbit / roaring, in µs; **bold** is faster:
 | | sparse arrays | dense bitmaps |
 |---|---|---|
 | `intersect` | **18** / 25 | **13** / 22 |
-| `union` | **114** / 795 | **25** / 39 |
+| `union` | **114** / 795 | **21** / 40 |
 | `difference` | **77** / 80 | **56** / 159 |
 
 frostbit wins all three ops on sparse **and** dense inputs, and on **run
