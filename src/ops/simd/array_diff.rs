@@ -30,7 +30,7 @@ pub(super) const COMPACT: [[u8; 16]; 256] = {
 };
 
 /// `a \ b` for sorted, unique slices. Returns the result length.
-pub(crate) fn array_diff(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
+pub fn array_diff(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     let (lo, hi) = if a.len() <= b.len() { (a.len(), b.len()) } else { (b.len(), a.len()) };
     #[cfg(target_arch = "aarch64")]
     unsafe {

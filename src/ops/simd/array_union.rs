@@ -9,7 +9,7 @@ use super::array_diff::COMPACT;
 use super::array_intersect::MERGE_MAX_RATIO;
 
 /// `a ∪ b` for sorted, unique slices, deduping. Returns the result length.
-pub(crate) fn array_union(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
+pub fn array_union(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     let (lo, hi) = if a.len() <= b.len() { (a.len(), b.len()) } else { (b.len(), a.len()) };
     #[cfg(target_arch = "aarch64")]
     unsafe {

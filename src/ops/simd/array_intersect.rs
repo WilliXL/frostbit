@@ -11,7 +11,7 @@ pub(super) const MERGE_MAX_RATIO: usize = 4;
 
 /// `a ∩ b` for sorted, unique slices. Returns the result length.
 #[inline]
-pub(crate) fn array_intersect(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
+pub fn array_intersect(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     let (lo, hi) = if a.len() <= b.len() { (a.len(), b.len()) } else { (b.len(), a.len()) };
     // Heavy skew → galloping binary search (scalar, all targets), but only when
     // its `rare·log2(freq)` work clears the broadcast-scan's `freq/W` linear
