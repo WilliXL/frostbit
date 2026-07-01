@@ -70,10 +70,14 @@ Realistic boolean filter shapes over a mixed-container leaf pool:
 
 | shape | frostbit | roaring |
 |---|---:|---:|
-| `conj5` — nested ANDs, flattened to one 5-way | **41 µs** | 77 µs |
-| `filter` — `base ∩ OR(domains) ∩ (¬lang)` | **27 µs** | 42 µs |
-| `cnf3` — AND of OR-groups | **88 µs** | 96 µs |
-| `dnf` — OR of AND-groups | 130 µs | **76 µs** |
+| `conj5` — nested ANDs, flattened to one 5-way | **41 µs** | 87 µs |
+| `filter` — `base ∩ OR(domains) ∩ (¬lang)` | **28 µs** | 44 µs |
+| `cnf3` — AND of OR-groups | **87 µs** | 100 µs |
+| `dnf` — OR of AND-groups | **56 µs** | 78 µs |
+
+Across randomly-generated trees (2–45 leaves) frostbit wins **every** shape,
+by 1.2× up to ~3.4× — e.g. a 31-leaf tree in **141 µs** vs roaring's 476 µs,
+an 18-leaf in **89 µs** vs 267 µs.
 
 ### Query-shape optimizations
 
@@ -88,16 +92,15 @@ frostbit / roaring, in µs; **bold** is faster:
 
 | | sparse arrays | dense bitmaps |
 |---|---|---|
-| `intersect` | 28 / **25** | **13** / 66 |
+| `intersect` | **18** / 25 | **13** / 22 |
 | `union` | **114** / 881 | **25** / 37 |
 | `difference` | 271 / **74** | **53** / 146 |
 
-frostbit wins dense intersect/difference and every union at scale, and is
+frostbit wins intersection (sparse *and* dense) and every union at scale, and is
 fastest on **run containers** across all three ops (8-way union 4.0 µs vs 17 µs;
-difference 2.6 µs vs 4.6 µs — frostbit folds runs natively). `roaring`'s
-vectorized small-array merge is faster on **low-arity sparse-array**
-intersect/difference (2-way sparse intersect: 23 µs vs its 14 µs) — the one
-workload where frostbit trails.
+difference 2.6 µs vs 4.6 µs — frostbit folds runs natively). The one remaining
+trail is **sparse-array `difference`**, whose kernel still uses the broadcast
+scan rather than the shuffle-merge that intersection now uses.
 
 ## Features
 
