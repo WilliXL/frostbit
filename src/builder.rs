@@ -1,6 +1,6 @@
 //! Builds a frozen bitmap from values pushed in strictly ascending order.
 
-use crate::bitmap::{aligned_buf, FrozenBitmap};
+use crate::bitmap::{result_buf, FrozenBitmap};
 use crate::format::*;
 
 /// Accumulates ascending `u32`s, then serializes to a [`FrozenBitmap`].
@@ -199,7 +199,7 @@ fn serialize_standard(containers: &[Built], total_card: u64) -> FrozenBitmap {
     let (offsets, total, has_runs, has_bitmap) = layout(containers);
     let data_base = data_section_off(n, has_bitmap);
 
-    let mut buf = aligned_buf(total);
+    let mut buf = result_buf(total);
     buf.resize(total, 0);
 
     Header {
@@ -236,7 +236,7 @@ fn serialize_standard(containers: &[Built], total_card: u64) -> FrozenBitmap {
 /// Only reached when FRI won the size comparison, i.e. tiny per-key counts.
 fn serialize_inline(containers: &[Built], count: usize) -> FrozenBitmap {
     let total = inline_size(count);
-    let mut buf = aligned_buf(total);
+    let mut buf = result_buf(total);
     buf.resize(total, 0);
     buf[0..2].copy_from_slice(&INLINE_MAGIC);
     write_u16(&mut buf, INLINE_COUNT_OFF, count as u16);

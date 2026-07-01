@@ -9,7 +9,7 @@
 //! thread-local pool (see [`pool`]), so steady-state `intersect`/`union`/`diff`
 //! allocate only their result.
 
-use crate::bitmap::{aligned_buf, AlignedBuf, FrozenBitmap};
+use crate::bitmap::{aligned_buf, result_buf, AlignedBuf, FrozenBitmap};
 use crate::container::Data;
 use crate::format::*;
 use crate::ops::cursor::ContainerRef;
@@ -290,7 +290,7 @@ impl OpArena {
         // The result buffer is filled completely below — header, index, the
         // alignment gaps, and every payload — so we skip the initial memset.
         // SAFETY: `u8` needs no init and no byte is read before being written.
-        let mut buf = aligned_buf(total);
+        let mut buf = result_buf(total);
         unsafe { buf.set_len(total) };
 
         Header {
