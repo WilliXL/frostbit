@@ -9,7 +9,7 @@
 
 use crate::format::*;
 use crate::ops::cursor::ContainerCursor;
-use crate::ops::plan::{Op, Plan, SlotPlan, UNION_DENSE_CARD};
+use crate::ops::plan::{wants_partner_major, Op, Plan, SlotPlan, UNION_DENSE_CARD};
 use crate::FrozenBitmapView;
 
 /// One output container's analysis: arena slot ceiling + parent-facing bound.
@@ -69,12 +69,9 @@ fn shrink(card: u32) -> u32 {
 
 /// Derive the arena [`Plan`] from an output shape.
 pub fn to_plan(op: Op, shape: &Shape) -> Plan {
-    Plan {
-        op,
-        slots: shape.iter().map(|m| SlotPlan { key: m.key, capacity: m.cap }).collect(),
-        scratch_bytes: 2 * BITMAP_BYTES,
-        double: op == Op::Diff,
-    }
+    let slots: Vec<SlotPlan> =
+        shape.iter().map(|m| SlotPlan { key: m.key, capacity: m.cap }).collect();
+    Plan { op, double: wants_partner_major(op, &slots), slots, scratch_bytes: 2 * BITMAP_BYTES }
 }
 
 /// A merge cursor over a shape.

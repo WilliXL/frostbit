@@ -75,6 +75,18 @@ pub fn fast_container_bytes(card: u32) -> usize {
     }
 }
 
+/// Partner-major folds pay off while the whole accumulator set stays
+/// cache-resident (each pass revisits every slot); past this footprint the
+/// key-major order (one hot accumulator, partners interleaved) wins.
+pub(crate) const PARTNER_MAJOR_MAX_ACC_BYTES: usize = 64 << 10;
+
+/// Whether `op` should fold partner-major over these slots (and so wants the
+/// mirror slot region for side-flipped array merges).
+pub(crate) fn wants_partner_major(op: Op, slots: &[SlotPlan]) -> bool {
+    matches!(op, Op::Diff | Op::Union)
+        && slots.iter().map(|s| s.capacity as usize).sum::<usize>() <= PARTNER_MAJOR_MAX_ACC_BYTES
+}
+
 /// Slot ceiling when a key is seeded from a container of `card` values and can
 /// only shrink (AND/DIFF): array form while it fits, else bitmap.
 #[inline]
@@ -149,7 +161,7 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
         } as u32;
         slots.push(SlotPlan { key, capacity });
     }
-    Plan { op: Op::Union, slots, scratch_bytes: SCRATCH_BYTES, double: false }
+    Plan { op: Op::Union, double: wants_partner_major(Op::Union, &slots), slots, scratch_bytes: SCRATCH_BYTES }
 }
 
 /// DIFF: `inputs[0]` (A) minus the rest. Output keys = A's keys (the RHS can
@@ -159,7 +171,7 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
 pub fn plan_diff<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = Vec::new();
     if inputs.is_empty() {
-        return Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES, double: true };
+        return Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES, double: false };
     }
     let mut a = inputs.cursor(0);
     let mut rhs: Vec<ContainerCursor<'_>> = (1..inputs.len()).map(|i| inputs.cursor(i)).collect();
@@ -175,7 +187,7 @@ pub fn plan_diff<I: Inputs + ?Sized>(inputs: &I) -> Plan {
         slots.push(SlotPlan { key, capacity });
         a.advance();
     }
-    Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES, double: true }
+    Plan { op: Op::Diff, double: wants_partner_major(Op::Diff, &slots), slots, scratch_bytes: SCRATCH_BYTES }
 }
 
 /// Smallest current key across cursors, or `None` when all are exhausted.

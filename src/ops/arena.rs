@@ -270,6 +270,33 @@ impl OpArena {
         }
     }
 
+    /// Slot `i`'s two sides plus the scratch region, all disjoint — for a merge
+    /// whose partner must be staged (extracted) before merging.
+    #[inline]
+    pub(crate) fn slot_pair_and_scratch(
+        &mut self,
+        i: usize,
+    ) -> (&mut [u8], &mut [u8], &mut [u8]) {
+        debug_assert!(self.stride > 0, "slot_pair needs a double-buffered plan");
+        let a = self.slot_off[i] as usize;
+        let b = a + self.stride;
+        let sz = self.slot_sz[i] as usize;
+        let (front, scratch) = self.buf.split_at_mut(self.scratch_off);
+        let (lo, hi) = front.split_at_mut(b);
+        let (a_sl, b_sl) = (&mut lo[a..a + sz], &mut hi[..sz]);
+        if self.state[i].side == 0 {
+            (a_sl, b_sl, scratch)
+        } else {
+            (b_sl, a_sl, scratch)
+        }
+    }
+
+    /// Whether this arena carries the mirror region (partner-major dispatch).
+    #[inline]
+    pub(crate) fn is_double(&self) -> bool {
+        self.stride > 0
+    }
+
     #[inline]
     pub(crate) fn flip_side(&mut self, i: usize) {
         self.state[i].side ^= 1;
