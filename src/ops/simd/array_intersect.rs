@@ -30,6 +30,11 @@ pub(crate) fn array_intersect(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     }
     #[cfg(target_arch = "x86_64")]
     unsafe {
+        // Balanced → shuffle-merge (SSSE3, for the byte-rotate); moderate skew →
+        // galloping broadcast-scan.
+        if lo >= 8 && hi <= lo * MERGE_MAX_RATIO && is_x86_feature_detected!("ssse3") {
+            return intersect_merge_sse(a, b, out);
+        }
         if is_x86_feature_detected!("avx2") {
             return intersect_avx2(a, b, out);
         }
@@ -189,6 +194,59 @@ fn broadcast_scan<const W: usize>(
 #[target_feature(enable = "neon")]
 unsafe fn intersect_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     broadcast_scan::<8>(a, b, out, |freq, f, v| unsafe { super::array_scan::window_has_neon(freq, f, v) })
+}
+
+/// SSSE3 twin of [`intersect_merge_neon`]: the same shuffle-merge, with
+/// `_mm_alignr_epi8` for the lane rotate (direction is irrelevant — all 8
+/// rotations are OR-ed) and `packs`+`movemask` for the lane mask.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn intersect_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
+    use std::arch::x86_64::*;
+    let (na, nb) = (a.len(), b.len());
+    let (mut ia, mut ib, mut k) = (0usize, 0usize, 0usize);
+    let mut va = _mm_loadu_si128(a.as_ptr().cast());
+    let mut vb = _mm_loadu_si128(b.as_ptr().cast());
+    loop {
+        let c0 = _mm_cmpeq_epi16(va, vb);
+        let c1 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<2>(vb, vb));
+        let c2 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<4>(vb, vb));
+        let c3 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<6>(vb, vb));
+        let c4 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<8>(vb, vb));
+        let c5 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<10>(vb, vb));
+        let c6 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<12>(vb, vb));
+        let c7 = _mm_cmpeq_epi16(va, _mm_alignr_epi8::<14>(vb, vb));
+        let m = _mm_or_si128(
+            _mm_or_si128(_mm_or_si128(c0, c1), _mm_or_si128(c2, c3)),
+            _mm_or_si128(_mm_or_si128(c4, c5), _mm_or_si128(c6, c7)),
+        );
+        // Saturating-pack the 8 u16 lanes to bytes (0xFFFF→0xFF, 0→0), then a
+        // byte movemask gives the 8-bit lane set.
+        let mut bits = (_mm_movemask_epi8(_mm_packs_epi16(m, m)) & 0xFF) as u32;
+        while bits != 0 {
+            let i = bits.trailing_zeros() as usize;
+            *out.get_unchecked_mut(k) = *a.get_unchecked(ia + i);
+            k += 1;
+            bits &= bits - 1;
+        }
+        let amax = _mm_extract_epi16::<7>(va) as u16;
+        let bmax = _mm_extract_epi16::<7>(vb) as u16;
+        if amax <= bmax {
+            ia += 8;
+            if ia + 8 > na {
+                break;
+            }
+            va = _mm_loadu_si128(a.as_ptr().add(ia).cast());
+        }
+        if bmax <= amax {
+            ib += 8;
+            if ib + 8 > nb {
+                break;
+            }
+            vb = _mm_loadu_si128(b.as_ptr().add(ib).cast());
+        }
+    }
+    k + intersect_scalar(&a[ia..], &b[ib..], &mut out[k..])
 }
 
 #[cfg(target_arch = "x86_64")]
