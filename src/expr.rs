@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::ops::arena::OpArena;
 use crate::ops::cursor::ContainerCursor;
+use crate::ops::keymask::KeyMask;
 use crate::ops::kernels;
 use crate::ops::plan::{Op as PlanOp, Plan};
 use crate::ops::shape::{self, view_shape, Shape};
@@ -48,6 +49,9 @@ pub struct FoldPlan<'a> {
     steps: Vec<Step<'a>>,
     shape: Shape,
     max_depth: usize,
+    /// Hole-punch mask (set by [`BitmapExpr::punch_holes`]): the root's surviving
+    /// container keys, applied to every leaf cursor so dead blocks are skipped.
+    live: Option<Arc<KeyMask>>,
 }
 
 /// A boolean combination of frozen bitmaps.
@@ -76,6 +80,25 @@ impl<'a> BitmapExpr<'a> {
     }
     pub fn difference(lhs: BitmapExpr<'a>, rhs: BitmapExpr<'a>) -> Self {
         BitmapExpr::Combined(FoldPlan::diff(lhs, rhs))
+    }
+
+    /// Enable hole-punching. When this is a root intersection (AND of ≥2
+    /// operands), derive the surviving container-key set and prune every leaf
+    /// cursor to it — dead 64K blocks are skipped before any fold, so an
+    /// `AND(narrow, OR(wide…))` never materializes the wide branch's dead
+    /// blocks. A no-op for any other shape, where no key set narrows.
+    pub fn punch_holes(self) -> Self {
+        match self {
+            BitmapExpr::Combined(mut fp) if fp.is_and_root() => {
+                let mut mask = KeyMask::empty();
+                for m in &fp.shape {
+                    mask.set(m.key);
+                }
+                fp.live = Some(Arc::new(mask));
+                BitmapExpr::Combined(fp)
+            }
+            other => other,
+        }
     }
 
     /// Number of leaves in the tree.
@@ -113,6 +136,16 @@ impl<'a> FoldPlan<'a> {
         self.max_depth
     }
 
+    /// True when the root fold is an intersection of ≥2 operands — the only
+    /// shape whose key set narrows what its branches can contribute (a union or
+    /// lone leaf spans all its leaves' keys, so a mask would prune nothing).
+    fn is_and_root(&self) -> bool {
+        matches!(
+            self.steps.last(),
+            Some(Step::Combine(arity, plan)) if *arity >= 2 && plan.op == PlanOp::Intersect
+        )
+    }
+
     /// Number of leaves folded by this plan.
     pub fn leaf_count(&self) -> usize {
         self.steps
@@ -140,7 +173,7 @@ impl<'a> FoldPlan<'a> {
             Op::Diff => unreachable!("combine is AND/OR only"),
         };
         steps.push(Step::Combine(arity, shape::to_plan(pop, &shape)));
-        FoldPlan { steps, shape, max_depth: max_depth.max(base).max(1) }
+        FoldPlan { steps, shape, max_depth: max_depth.max(base).max(1), live: None }
     }
 
     /// `lhs` minus `rhs` (never flattened — DIFF is not associative).
@@ -150,7 +183,7 @@ impl<'a> FoldPlan<'a> {
         let (s1, _, d1) = splice(rhs, Op::Diff, &mut steps);
         let shape = shape::diff_shape(&[s0, s1]);
         steps.push(Step::Combine(2, shape::to_plan(PlanOp::Diff, &shape)));
-        FoldPlan { steps, shape, max_depth: d0.max(1 + d1).max(2) }
+        FoldPlan { steps, shape, max_depth: d0.max(1 + d1).max(2), live: None }
     }
 
     /// Run the manifest over a preallocated operand stack. Each `Combine` sizes
@@ -162,6 +195,7 @@ impl<'a> FoldPlan<'a> {
         let mut guard = ExecStack::take();
         let stack = guard.borrow();
         stack.reserve(self.max_depth);
+        let mask = self.live.as_deref();
         for step in &self.steps {
             match step {
                 Step::Leaf(v) => stack.push(Acc::Leaf(*v)),
@@ -169,10 +203,11 @@ impl<'a> FoldPlan<'a> {
                 Step::Combine(arity, plan) => {
                     let start = stack.len() - *arity as usize;
                     let mut arena = OpArena::from_plan(plan);
+                    let inputs = Masked { accs: &stack[start..], mask };
                     match plan.op {
-                        PlanOp::Intersect => kernels::intersect_fold(&mut arena, &stack[start..]),
-                        PlanOp::Union => kernels::union_fold(&mut arena, &stack[start..]),
-                        PlanOp::Diff => kernels::diff_fold(&mut arena, &stack[start..]),
+                        PlanOp::Intersect => kernels::intersect_fold(&mut arena, &inputs),
+                        PlanOp::Union => kernels::union_fold(&mut arena, &inputs),
+                        PlanOp::Diff => kernels::diff_fold(&mut arena, &inputs),
                     }
                     stack.truncate(start);
                     stack.push(Acc::Arena(arena));
@@ -250,21 +285,30 @@ enum Acc<'a> {
     Arena(OpArena),
 }
 
-impl Inputs for [Acc<'_>] {
+/// One `Combine`'s operand slice, optionally hole-punched. Leaf cursors skip
+/// keys absent from `mask`; intermediate arenas are already pruned (their leaves
+/// were masked when they were folded), so they read back verbatim.
+struct Masked<'a, 'm> {
+    accs: &'a [Acc<'a>],
+    mask: Option<&'m KeyMask>,
+}
+
+impl Inputs for Masked<'_, '_> {
     #[inline]
     fn len(&self) -> usize {
-        <[_]>::len(self)
+        self.accs.len()
     }
     #[inline]
     fn cursor(&self, i: usize) -> ContainerCursor<'_> {
-        match &self[i] {
-            Acc::Leaf(v) => ContainerCursor::new(v),
-            Acc::Arena(a) => ContainerCursor::from_arena(a),
+        match (&self.accs[i], self.mask) {
+            (Acc::Leaf(v), Some(mask)) => ContainerCursor::new_live(v, mask),
+            (Acc::Leaf(v), None) => ContainerCursor::new(v),
+            (Acc::Arena(a), _) => ContainerCursor::from_arena(a),
         }
     }
     #[inline]
     fn container_count(&self, i: usize) -> usize {
-        match &self[i] {
+        match &self.accs[i] {
             Acc::Leaf(v) => view_container_count(v),
             Acc::Arena(a) => a.container_count(),
         }

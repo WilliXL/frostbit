@@ -5,6 +5,7 @@
 use crate::container::Data;
 use crate::format::*;
 use crate::ops::arena::OpArena;
+use crate::ops::keymask::KeyMask;
 use crate::FrozenBitmapView;
 
 /// One container's metadata + payload. For inline inputs, `typ` is
@@ -61,24 +62,35 @@ pub struct ContainerCursor<'a> {
     n: usize,
     // Container index (standard/arena) or value index (inline).
     pos: usize,
+    /// Hole-punch mask: when set, the cursor skips every key not in it.
+    live: Option<&'a KeyMask>,
 }
 
 impl<'a> ContainerCursor<'a> {
     pub fn new(view: &FrozenBitmapView<'a>) -> Self {
         let bytes = view.as_bytes();
         if let Some((n, data_base)) = view.standard_dims() {
-            Self { backing: Backing::Bytes { bytes, inline: false, data_base }, n, pos: 0 }
+            Self { backing: Backing::Bytes { bytes, inline: false, data_base }, n, pos: 0, live: None }
         } else {
             let count = view.inline_count().unwrap_or(0);
             let data_base = INLINE_HEADER_SIZE;
-            Self { backing: Backing::Bytes { bytes, inline: true, data_base }, n: count, pos: 0 }
+            Self { backing: Backing::Bytes { bytes, inline: true, data_base }, n: count, pos: 0, live: None }
         }
+    }
+
+    /// Like [`new`](Self::new), but skips container keys absent from `live`
+    /// (hole-punching): the cursor only ever rests on / yields live keys.
+    pub fn new_live(view: &FrozenBitmapView<'a>, live: &'a KeyMask) -> Self {
+        let mut c = Self::new(view);
+        c.live = Some(live);
+        c.skip_dead();
+        c
     }
 
     /// Read a working arena as an ordered container source (no serialization).
     pub fn from_arena(arena: &'a OpArena) -> Self {
         debug_assert!(arena.is_key_sorted(), "arena source must be key-ascending");
-        Self { backing: Backing::Arena(arena), n: arena.container_count(), pos: 0 }
+        Self { backing: Backing::Arena(arena), n: arena.container_count(), pos: 0, live: None }
     }
 
     /// Key of the current container, or `None` when exhausted.
@@ -128,8 +140,17 @@ impl<'a> ContainerCursor<'a> {
         }
     }
 
-    /// Advance past the current container.
+    /// Advance past the current container, then rest on the next live key.
+    #[inline]
     pub fn advance(&mut self) {
+        self.advance_raw();
+        if self.live.is_some() {
+            self.skip_dead();
+        }
+    }
+
+    /// Advance past the current container (ignoring the live mask).
+    fn advance_raw(&mut self) {
         if let Backing::Bytes { bytes, inline: true, data_base } = &self.backing {
             let Some(key) = self.peek_key() else { return };
             while self.pos < self.n
@@ -142,15 +163,28 @@ impl<'a> ContainerCursor<'a> {
         }
     }
 
-    /// Advance until the current key ≥ `target`. Returns `true` if it equals it.
-    pub fn advance_to(&mut self, target: u16) -> bool {
+    /// Advance past any leading dead (non-live) keys so `pos` rests on a live one.
+    fn skip_dead(&mut self) {
+        let Some(mask) = self.live else { return };
         while let Some(k) = self.peek_key() {
-            if k >= target {
-                return k == target;
+            if mask.contains(k) {
+                break;
             }
-            self.advance();
+            self.advance_raw();
         }
-        false
+    }
+
+    /// Advance until the current key ≥ `target`. Returns `true` if it equals it.
+    /// Dead keys are skipped, so a hit is always a live key.
+    pub fn advance_to(&mut self, target: u16) -> bool {
+        while self.peek_key().is_some_and(|k| k < target) {
+            self.advance_raw();
+        }
+        let hit = self.peek_key() == Some(target);
+        if self.live.is_some() {
+            self.skip_dead();
+        }
+        hit
     }
 }
 

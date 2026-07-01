@@ -124,3 +124,29 @@ fn random_trees_match_roaring() {
         assert_tree(&expr, &want);
     }
 }
+
+/// Hole-punching is result-preserving: an AND-rooted tree, punched, must yield
+/// exactly the roaring oracle. Roots are forced to N-way ANDs (the only shape
+/// `punch_holes` engages), with random — often OR/DIFF — branches underneath so
+/// the mask prunes dead keys inside nested subtrees.
+#[test]
+fn punched_and_trees_match_roaring() {
+    let mut st = 0x50FF_2026_u64;
+    let pool = Pool::new(&mut st, 12);
+    for _ in 0..400 {
+        let n = 2 + (splitmix64(&mut st) % 4) as usize;
+        let depth = 1 + (splitmix64(&mut st) % 4) as u32;
+        let mut exprs = Vec::new();
+        let mut acc: Option<RoaringBitmap> = None;
+        for _ in 0..n {
+            let (e, r) = random_tree(&mut st, &pool, depth);
+            exprs.push(e);
+            acc = Some(match acc {
+                None => r,
+                Some(a) => a & r,
+            });
+        }
+        let expr = BitmapExpr::and(exprs).punch_holes();
+        assert_tree(&expr, &acc.unwrap());
+    }
+}

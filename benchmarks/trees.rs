@@ -122,6 +122,18 @@ fn mixed_pool() -> Set {
     Set::new(&inputs)
 }
 
+/// A leaf whose blocks span keys `[k0, k1)`, `per_key` random values each — used
+/// to build key-selective trees (a narrow band ∩ wide bands) for hole-punching.
+fn band(k0: u16, k1: u16, per_key: u32, st: &mut u64) -> Vec<u32> {
+    let mut v = Vec::new();
+    for k in k0..k1 {
+        for _ in 0..per_key {
+            v.push(((k as u32) << 16) | (splitmix64(st) % 65536) as u32);
+        }
+    }
+    sorted(v)
+}
+
 /// Named realistic shapes over the mixed pool (indices chosen for variety).
 fn named() -> Vec<(&'static str, Spec)> {
     vec![
@@ -171,6 +183,32 @@ fn bench(c: &mut Criterion) {
         });
     }
     g.finish();
+
+    // Hole-punching: a key-selective AND — a narrow 4-block filter intersected
+    // with wide 256-block OR-groups. Punching derives the 4 surviving blocks
+    // from the narrow branch and prunes the wide branches to them before folding.
+    let mut st2 = 0xB0B0_CAFEu64;
+    let sel = Set::new(&[
+        band(0, 4, 1500, &mut st2),   // 0: narrow filter — 4 blocks
+        band(0, 256, 250, &mut st2),  // 1..=4: wide — 256 blocks each
+        band(0, 256, 250, &mut st2),
+        band(0, 256, 250, &mut st2),
+        band(0, 256, 250, &mut st2),
+    ]);
+    let sel_spec = and(vec![leaf(0), or(vec![leaf(1), leaf(2)]), or(vec![leaf(3), leaf(4)])]);
+    let want = rb_vec(&eval_rb(&sel_spec, &sel));
+    assert_eq!(fb_vec(&build_fb(&sel_spec, &sel).materialize()), want, "selective plain");
+    assert_eq!(fb_vec(&build_fb(&sel_spec, &sel).punch_holes().materialize()), want, "selective punched");
+
+    let unpunched = build_fb(&sel_spec, &sel);
+    let punched = build_fb(&sel_spec, &sel).punch_holes();
+    let mut h = c.benchmark_group("holepunch");
+    h.bench_function("selective/frostbit", |b| b.iter(|| black_box(unpunched.materialize())));
+    h.bench_function("selective/frostbit_punched", |b| b.iter(|| black_box(punched.materialize())));
+    h.bench_function("selective/roaring", |b| {
+        b.iter(|| black_box(eval_rb(black_box(&sel_spec), &sel)))
+    });
+    h.finish();
 }
 
 criterion_group! {
