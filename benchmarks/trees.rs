@@ -196,10 +196,56 @@ fn gen_profiled(st: &mut u64, budget: usize, depth: usize, prof: &Profile, n: us
     }
 }
 
+/// Realized depth of a spec (a leaf counts 1).
+fn depth_of(spec: &Spec) -> usize {
+    match spec {
+        Spec::Leaf(_) => 1,
+        Spec::And(cs) | Spec::Or(cs) => 1 + cs.iter().map(depth_of).max().unwrap_or(0),
+        Spec::Diff(a, b) => 1 + depth_of(a).max(depth_of(b)),
+    }
+}
+
+/// A "pillar" tree hitting both corpus extremes at once: exactly `LEAVES`
+/// leaves AND a realized depth of `DEPTH`. Built bottom-up along a spine of
+/// nested nodes, hanging the remaining leaves across its levels at random
+/// (random ops, random spine position per level).
+fn gen_pillar(st: &mut u64, pool_len: usize) -> Spec {
+    const LEAVES: usize = 100;
+    const DEPTH: usize = 15;
+    const SPINE: usize = DEPTH - 1; // internal levels above the deepest leaf
+
+    // ≥1 extra leaf per spine level (every node needs ≥2 children); scatter
+    // the rest randomly across the levels.
+    let mut extra = [1usize; SPINE];
+    for _ in 0..LEAVES - 1 - SPINE {
+        extra[(splitmix64(st) as usize) % SPINE] += 1;
+    }
+
+    let rand_leaf = |st: &mut u64| Spec::Leaf((splitmix64(st) as usize) % pool_len);
+    let mut cur = rand_leaf(st);
+    for &m in &extra {
+        let r = splitmix64(st) % 100;
+        if r < 20 && m == 1 {
+            // Diff level (binary): the spine randomly on either side.
+            let l = rand_leaf(st);
+            cur = if splitmix64(st) % 2 == 0 { diff(cur, l) } else { diff(l, cur) };
+            continue;
+        }
+        let mut kids: Vec<Spec> = (0..m).map(|_| rand_leaf(st)).collect();
+        kids.insert((splitmix64(st) as usize) % (kids.len() + 1), cur);
+        cur = if r < 60 { and(kids) } else { or(kids) };
+    }
+    debug_assert_eq!(count_leaves(&cur), LEAVES);
+    debug_assert_eq!(depth_of(&cur), DEPTH);
+    cur
+}
+
 /// The 25k-tree corpus: up to 100 leaves and 15 levels per tree, deterministic.
+/// The last 100 trees are pillars — guaranteed 100-leaf AND 15-deep.
 fn corpus_specs(n_trees: usize, pool_len: usize) -> Vec<Spec> {
     let mut st = 0xC0_2b_05_2026_u64;
-    (0..n_trees)
+    let pillars = 100.min(n_trees);
+    let mut specs: Vec<Spec> = (0..n_trees - pillars)
         .map(|_| {
             // Log-ish spread of sizes: plenty of small trees, a long large tail.
             let budget = match splitmix64(&mut st) % 10 {
@@ -216,7 +262,11 @@ fn corpus_specs(n_trees: usize, pool_len: usize) -> Vec<Spec> {
             };
             gen_profiled(&mut st, budget, depth, &prof, pool_len)
         })
-        .collect()
+        .collect();
+    specs.extend((0..pillars).map(|_| gen_pillar(&mut st, pool_len)));
+    let full = specs.iter().filter(|s| count_leaves(s) == 100 && depth_of(s) == 15).count();
+    assert!(full >= pillars, "corpus must include ≥{pillars} full-extreme trees");
+    specs
 }
 
 /// Whole-corpus throughput: evaluate all 25k trees per iteration (frostbit
@@ -234,19 +284,20 @@ fn corpus(c: &mut Criterion) {
         assert_eq!(got, want, "frostbit≠roaring in corpus tree {i}");
     }
 
+    println!("corpus: {} trees, {} total leaves", specs.len(), total_leaves);
     let mut g = c.benchmark_group("corpus");
     g.sample_size(10);
     g.warm_up_time(Duration::from_secs(2));
     g.measurement_time(Duration::from_secs(20));
     g.throughput(criterion::Throughput::Elements(specs.len() as u64));
-    g.bench_function(format!("25k_trees_{total_leaves}leaves/frostbit"), |b| {
+    g.bench_function("25k_trees/frostbit", |b| {
         b.iter(|| {
             for spec in &specs {
                 black_box(build_fb(spec, &pool).materialize());
             }
         })
     });
-    g.bench_function(format!("25k_trees_{total_leaves}leaves/{RB}"), |b| {
+    g.bench_function(format!("25k_trees/{RB}"), |b| {
         b.iter(|| {
             for spec in &specs {
                 black_box(eval_rb(spec, &pool));
