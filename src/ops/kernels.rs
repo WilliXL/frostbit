@@ -363,23 +363,30 @@ fn run_fold(
 ) -> (u32, usize) {
     let (slot, scratch) = arena.slot_and_scratch(i);
     let (a, b) = scratch.split_at_mut(BITMAP_BYTES);
-    let acc: &mut [Run] = bytemuck::cast_slice_mut(a);
-    let tmp: &mut [Run] = bytemuck::cast_slice_mut(b);
 
-    let s = as_runs(seed);
-    acc[..s.len()].copy_from_slice(s);
-    let mut nr = s.len();
-    let mut card = seed.card;
-    for p in partners {
-        let (n, c) = op(&acc[..nr], as_runs(p), tmp);
-        acc[..n].copy_from_slice(&tmp[..n]);
-        nr = n;
-        card = c;
+    // Fold 1 reads the seed's runs straight from its container; after that the
+    // accumulator ping-pongs between the scratch halves (no per-fold copy).
+    let (mut nr, mut card, mut in_b) = (seed.num_runs(), seed.card, false);
+    let mut rest = partners.iter();
+    match rest.next() {
+        Some(p0) => {
+            (nr, card) = op(as_runs(seed), as_runs(p0), bytemuck::cast_slice_mut(a));
+        }
+        None => {
+            let s = as_runs(seed);
+            bytemuck::cast_slice_mut::<u8, Run>(a)[..s.len()].copy_from_slice(s);
+        }
+    }
+    for p in rest {
+        let (src, dst): (&[u8], &mut [u8]) = if in_b { (b, a) } else { (a, b) };
+        let src: &[Run] = &bytemuck::cast_slice(src)[..nr];
+        (nr, card) = op(src, as_runs(p), bytemuck::cast_slice_mut(dst));
+        in_b = !in_b;
     }
 
+    let cur: &[u8] = if in_b { b } else { a };
     write_u16(slot, 0, nr as u16);
-    let dst: &mut [Run] = bytemuck::cast_slice_mut(&mut slot[2..2 + nr * 4]);
-    dst.copy_from_slice(&acc[..nr]);
+    slot[2..2 + nr * 4].copy_from_slice(&cur[..nr * 4]);
     (card, 2 + nr * 4)
 }
 
@@ -408,27 +415,29 @@ fn run_fold_diff(
 ) -> (u32, usize) {
     let (slot, scratch) = arena.slot_and_scratch(i);
     let (a, b) = scratch.split_at_mut(BITMAP_BYTES);
-    let acc: &mut [Run] = bytemuck::cast_slice_mut(a);
-    let tmp: &mut [Run] = bytemuck::cast_slice_mut(b);
 
-    let l = as_runs(lhs);
-    acc[..l.len()].copy_from_slice(l);
-    let mut nr = l.len();
-    let mut card = lhs.card;
-    for p in rhs {
-        let (n, c) = match p.typed() {
-            Data::Run(pr) => run::diff(&acc[..nr], pr, tmp),
-            Data::Array(pa) => run::diff_array(&acc[..nr], pa, tmp),
-            _ => unreachable!("run_fold_diff partner must be run or array"),
-        };
-        acc[..n].copy_from_slice(&tmp[..n]);
-        nr = n;
-        card = c;
+    // Fold 1 reads the lhs runs straight from its container; after that the
+    // accumulator ping-pongs between the scratch halves (see run_fold).
+    let step = |src: &[Run], p: &ContainerRef<'_>, dst: &mut [u8]| match p.typed() {
+        Data::Run(pr) => run::diff(src, pr, bytemuck::cast_slice_mut(dst)),
+        Data::Array(pa) => run::diff_array(src, pa, bytemuck::cast_slice_mut(dst)),
+        _ => unreachable!("run_fold_diff partner must be run or array"),
+    };
+    let (mut nr, mut card, mut in_b) = (lhs.num_runs(), lhs.card, false);
+    let mut rest = rhs.iter();
+    if let Some(p0) = rest.next() {
+        (nr, card) = step(as_runs(lhs), p0, a);
+    }
+    for p in rest {
+        let (src, dst): (&[u8], &mut [u8]) = if in_b { (b, a) } else { (a, b) };
+        let src: &[Run] = &bytemuck::cast_slice(src)[..nr];
+        (nr, card) = step(src, p, dst);
+        in_b = !in_b;
     }
 
+    let cur: &[u8] = if in_b { b } else { a };
     write_u16(slot, 0, nr as u16);
-    let dst: &mut [Run] = bytemuck::cast_slice_mut(&mut slot[2..2 + nr * 4]);
-    dst.copy_from_slice(&acc[..nr]);
+    slot[2..2 + nr * 4].copy_from_slice(&cur[..nr * 4]);
     (card, 2 + nr * 4)
 }
 
