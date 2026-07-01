@@ -93,14 +93,16 @@ frostbit / roaring, in µs; **bold** is faster:
 | | sparse arrays | dense bitmaps |
 |---|---|---|
 | `intersect` | **18** / 25 | **13** / 22 |
-| `union` | **114** / 881 | **25** / 37 |
-| `difference` | 271 / **74** | **53** / 146 |
+| `union` | **114** / 795 | **25** / 39 |
+| `difference` | **77** / 80 | **56** / 159 |
 
-frostbit wins intersection (sparse *and* dense) and every union at scale, and is
-fastest on **run containers** across all three ops (8-way union 4.0 µs vs 17 µs;
-difference 2.6 µs vs 4.6 µs — frostbit folds runs natively). The one remaining
-trail is **sparse-array `difference`**, whose kernel still uses the broadcast
-scan rather than the shuffle-merge that intersection now uses.
+frostbit wins all three ops on sparse **and** dense inputs, and on **run
+containers** across the board (8-way union 4.0 µs vs 17 µs; difference 2.6 µs vs
+4.6 µs — runs are folded natively). Balanced sorted-array intersect / union /
+difference each use a SIMD shuffle-merge (CRoaring-style compare-all-pairs and
+Inoue–Taura rotate networks, NEON + x86); heavily-skewed pairs dispatch to a
+galloping search. Across the full 2–16-way sweep the only remaining trails are
+within a few percent (16-way run-intersect, 2-way sparse-array difference).
 
 ## Features
 
