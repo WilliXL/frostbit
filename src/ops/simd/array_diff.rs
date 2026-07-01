@@ -11,7 +11,7 @@ use super::array_intersect::MERGE_MAX_RATIO;
 /// Byte-shuffle indices that compact the set lanes of a `u16x8` to the front,
 /// keyed by the 8-bit lane mask. Unused trailing bytes are `0xFF` (≥16), which
 /// both NEON `vqtbl1q` and x86 `pshufb` map to zero. `popcount(mask)` lanes valid.
-const COMPACT: [[u8; 16]; 256] = {
+pub(super) const COMPACT: [[u8; 16]; 256] = {
     let mut t = [[0xFFu8; 16]; 256];
     let mut m = 0usize;
     while m < 256 {
