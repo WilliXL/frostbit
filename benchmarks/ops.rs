@@ -65,9 +65,9 @@ fn bench(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .sample_size(15)
-        .warm_up_time(Duration::from_millis(400))
-        .measurement_time(Duration::from_secs(2));
+        .sample_size(30)
+        .warm_up_time(Duration::from_millis(1200))
+        .measurement_time(Duration::from_secs(4));
     targets = bench
 }
 criterion_main!(benches);
