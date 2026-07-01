@@ -8,13 +8,13 @@ deserialization — the read-optimized counterpart to a mutable
 [`roaring::RoaringBitmap`](https://docs.rs/roaring).
 
 ```rust
-use frostbit::{FrozenBitmapBuilder, FrozenBitmapView, intersect_fast};
+use frostbit::FrozenBitmapBuilder;
 
 let mut b = FrozenBitmapBuilder::new();
 b.extend_sorted([10, 20, 70_000]);
 let bm = b.finish();              // compact, ready to persist or mmap
 
-let v = FrozenBitmapView::from_bytes(bm.as_bytes()).unwrap();
+let v = bm.view();                // zero-copy view; infallible on an owned bitmap
 assert!(v.contains(20));
 assert_eq!(v.len(), 3);
 ```
@@ -86,10 +86,21 @@ covers tiny scattered sets where per-container overhead would dominate.
 
 ### Reading
 
-`FrozenBitmapView::from_bytes(&[u8])` validates and borrows — no copy, so it
-reads straight out of an `mmap`. `FrozenBitmap::from_bytes` is the owned
-(copying) variant. Queries: `contains`, `len`, `is_empty`, `min`, `max`,
-`num_containers`, and ascending `iter()`.
+An owned `FrozenBitmap` is valid by construction, so `bm.view()` is
+**infallible** — reach for it whenever you built or converted the bitmap
+yourself. Validation only exists at the trust boundary: for foreign bytes
+(an `mmap`, a network payload), `FrozenBitmapView::from_bytes(&[u8])`
+validates and borrows without copying, returning `None` for malformed input —
+handle it there rather than unwrapping:
+
+```rust
+let Some(v) = FrozenBitmapView::from_bytes(&mapped) else {
+    anyhow::bail!("corrupt bitmap segment");
+};
+```
+
+`FrozenBitmap::from_bytes` is the owned (copying) variant. Queries: `contains`,
+`len`, `is_empty`, `min`, `max`, `num_containers`, and ascending `iter()`.
 
 ### Ops
 
