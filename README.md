@@ -30,6 +30,12 @@ assert_eq!(v.len(), 3);
   `difference_fast` size their working arena from an up-front analysis pass that
   proves each output container's capacity — so execution **never allocates a
   container at runtime** (no grow, no realloc).
+- **Boolean expression trees.** `BitmapExpr` combines leaves with AND / OR / DIFF
+  and evaluates them from a fold plan built **once** at construction: same-op
+  chains flatten to one N-way op, intermediates chain as pooled arenas
+  (serialized only at the end), and a `materialize` allocates *only its result*.
+  Opt-in **hole-punching** (`punch_holes`) prunes dead 64K blocks before folding,
+  and an empty AND/DIFF subtree **short-circuits** the rest of the tree.
 - **SIMD container kernels** (NEON / SSE2 with scalar fallbacks) plus
   autovectorized word operations.
 - **First-class `roaring` interop** behind the default `roaring` feature:
@@ -37,11 +43,61 @@ assert_eq!(v.len(), 3);
 
 ## Status
 
-Early. The builder, zero-copy view, roaring conversions, and flat N-way
-`intersect`/`union`/`difference` ops are implemented and extensively tested
-(differential against `roaring`, including 10M-element and randomized stress
-suites). A lazy expression-tree evaluator, container-pruning ("hole-punching"),
-and the `_compact` op finalizers are planned.
+The builder, zero-copy view, roaring conversions, flat N-way
+`intersect`/`union`/`difference` ops, the `BitmapExpr` expression-tree evaluator
+(plan reuse, hole-punching, subtree short-circuit), and the `_compact` op
+finalizers are implemented and extensively tested — differential against
+`roaring` (including 10M-element and randomized stress suites, and an
+11.6k-case arena-sizing stress). API surface is still pre-1.0.
+
+## Benchmarks
+
+Measured with [criterion](https://docs.rs/criterion) against `roaring` 0.11.4
+(with its nightly `simd` feature enabled) on Apple Silicon (aarch64 / NEON):
+
+```
+cargo +nightly bench --features roaring-simd
+```
+
+`roaring` is the mutable `RoaringBitmap`; it has no reusable plan, so it
+re-evaluates on each call, whereas a `BitmapExpr` fold plan is built once. Tree
+benchmarks **include plan construction** in the timed region. Numbers are
+criterion medians — indicative, and vary with hardware and run.
+
+### Expression trees
+
+Realistic boolean filter shapes over a mixed-container leaf pool:
+
+| shape | frostbit | roaring |
+|---|---:|---:|
+| `conj5` — nested ANDs, flattened to one 5-way | **41 µs** | 77 µs |
+| `filter` — `base ∩ OR(domains) ∩ (¬lang)` | **27 µs** | 42 µs |
+| `cnf3` — AND of OR-groups | **88 µs** | 96 µs |
+| `dnf` — OR of AND-groups | 130 µs | **76 µs** |
+
+### Query-shape optimizations
+
+| | frostbit | roaring |
+|---|---:|---:|
+| **Hole-punching** — narrow filter ∩ wide OR-groups (dead blocks skipped) | **8.3 µs** *(713 µs un-punched)* | 371 µs |
+| **Short-circuit** — AND with an empty subtree (sibling never evaluated) | **264 ns** | 401 µs |
+
+### N-way flat ops (8-way)
+
+frostbit / roaring, in µs; **bold** is faster:
+
+| | sparse arrays | dense bitmaps |
+|---|---|---|
+| `intersect` | 28 / **25** | **13** / 66 |
+| `union` | **114** / 881 | **25** / 37 |
+| `difference` | 271 / **74** | **53** / 146 |
+
+frostbit wins dense intersect/difference and every union at scale, and is
+fastest on **run containers** across all three ops (8-way union 4.0 µs vs 17 µs;
+difference 2.6 µs vs 4.6 µs — frostbit folds runs natively). `roaring`'s
+vectorized small-array merge is faster on **low-arity sparse-array**
+intersect/difference (2-way sparse intersect: 23 µs vs its 14 µs) — the one
+workload where frostbit trails.
 
 ## Features
 
