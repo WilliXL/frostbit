@@ -63,6 +63,19 @@ impl Plan {
 /// construction and never extracts a bitmap.
 pub(crate) const UNION_DENSE_CARD: u32 = ARRAY_MAX_SIZE as u32;
 
+/// Fan-in-aware union promotion: with `n` containers at a key, the array path
+/// streams ~`sum·(n+1)/2` elements (each merge re-streams the accumulator),
+/// while a bitmap accumulator costs ~clear + scatter(sum) + popcount. Break-
+/// even (measured: ~0.85ns/streamed element, ~450ns fixed + ~1.2ns/scatter):
+/// never at n ≤ 3, sum ≳ 1000 at n = 4, falling as fan-in grows. The monorepo
+/// promotes at a blunt sum > 256 regardless of fan-in, which trades away
+/// low-fan-in shapes (cnf3-style AND-of-OR-groups) — fan-in awareness keeps
+/// those as arrays.
+#[inline]
+pub(crate) fn union_promotes(n: usize, sum_card: u32) -> bool {
+    n >= 4 && sum_card as usize * (n - 3) > 1000
+}
+
 /// Bytes a result container of `card` values takes in op-ready (`_fast`) form:
 /// an array while it fits, otherwise a bitmap. The capacity contract sizes
 /// every slot to be ≥ this for its result.
@@ -140,6 +153,7 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
         let mut total_runs = 0usize;
         let mut any_bitmap = false;
         let mut max_single = 0usize;
+        let mut n_present = 0usize;
         for c in &mut cursors {
             if c.peek_key() == Some(key) {
                 let cr = c.get();
@@ -147,11 +161,14 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
                 total_runs += cr.num_runs();
                 any_bitmap |= cr.typ == CT_BITMAP;
                 max_single = max_single.max(cr.stored_bytes());
+                n_present += 1;
                 c.advance();
             }
         }
-        let needs_bitmap =
-            any_bitmap || sum_card > UNION_DENSE_CARD || total_runs > MAX_RUNS;
+        let needs_bitmap = any_bitmap
+            || sum_card > UNION_DENSE_CARD
+            || total_runs > MAX_RUNS
+            || union_promotes(n_present, sum_card);
         let capacity = if needs_bitmap {
             BITMAP_BYTES
         } else {

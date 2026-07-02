@@ -165,10 +165,12 @@ impl<'a> FoldPlan<'a> {
     fn combine(op: Op, children: impl IntoIterator<Item = BitmapExpr<'a>>) -> Self {
         let mut steps = Vec::new();
         let mut shapes: Vec<Shape> = Vec::new();
+        let mut weights: Vec<usize> = Vec::new();
         let (mut arity, mut base, mut max_depth) = (0u32, 0usize, 0usize);
         for child in children {
             let (shape, net, depth, guardable) = splice(child, op, &mut steps);
             shapes.push(shape);
+            weights.push(net as usize);
             max_depth = max_depth.max(base + depth);
             base += net as usize;
             arity += net;
@@ -181,7 +183,7 @@ impl<'a> FoldPlan<'a> {
         }
         let (pop, shape) = match op {
             Op::And => (PlanOp::Intersect, shape::intersect_shape(&shapes)),
-            Op::Or => (PlanOp::Union, shape::union_shape(&shapes)),
+            Op::Or => (PlanOp::Union, shape::union_shape(&shapes, &weights)),
             Op::Diff => unreachable!("combine is AND/OR only"),
         };
         let after = steps.len() + 1;

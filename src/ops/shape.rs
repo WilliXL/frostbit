@@ -9,7 +9,7 @@
 
 use crate::format::*;
 use crate::ops::cursor::ContainerCursor;
-use crate::ops::plan::{wants_partner_major, Op, Plan, SlotPlan, UNION_DENSE_CARD};
+use crate::ops::plan::{union_promotes, wants_partner_major, Op, Plan, SlotPlan, UNION_DENSE_CARD};
 use crate::FrozenBitmapView;
 
 /// One output container's analysis: arena slot ceiling + parent-facing bound.
@@ -127,13 +127,17 @@ pub fn intersect_shape(inputs: &[Shape]) -> Shape {
 }
 
 /// OR: union of keys; mirrors `union_key`'s bitmap/array/run choice.
-pub fn union_shape(inputs: &[Shape]) -> Shape {
+/// `weights[i]` is input `i`'s flattened operand count: a summarized sub-union
+/// stands for that many executor operands, so the fan-in promotion predicate
+/// must count it as such (an upper bound on the runtime fan-in per key).
+pub fn union_shape(inputs: &[Shape], weights: &[usize]) -> Shape {
+    debug_assert_eq!(inputs.len(), weights.len());
     let mut curs: Vec<Cur> = inputs.iter().map(Cur::new).collect();
     let mut out = Vec::new();
     while let Some(key) = min_key(&curs) {
         let (mut sum, mut runs, mut any_bitmap, mut all_run, mut max_single, mut n) =
             (0u32, 0usize, false, true, 0u32, 0usize);
-        for c in &mut curs {
+        for (c, w) in curs.iter_mut().zip(weights) {
             if c.key() == Some(key) {
                 let m = c.take();
                 sum = sum.saturating_add(m.card);
@@ -141,10 +145,11 @@ pub fn union_shape(inputs: &[Shape]) -> Shape {
                 any_bitmap |= m.typ == CT_BITMAP;
                 all_run &= m.typ == CT_RUN;
                 max_single = max_single.max(m.stored());
-                n += 1;
+                n += w;
             }
         }
-        let needs_bitmap = any_bitmap || sum > UNION_DENSE_CARD || runs > MAX_RUNS;
+        let needs_bitmap =
+            any_bitmap || sum > UNION_DENSE_CARD || runs > MAX_RUNS || union_promotes(n, sum);
         let (cap, typ, oruns) = if needs_bitmap && all_run && n > 0 && runs <= MAX_RUNS {
             (BITMAP_BYTES as u32, CT_RUN, runs as u16)
         } else if needs_bitmap {

@@ -6,7 +6,7 @@ use crate::container::{as_bitmap_mut, Bitmap, Data, Run};
 use crate::format::*;
 use crate::ops::arena::{OpArena, SlotState};
 use crate::ops::cursor::{ContainerRef, FoldScratch};
-use crate::ops::plan::{plan_diff, plan_intersect, plan_union, UNION_DENSE_CARD};
+use crate::ops::plan::{plan_diff, plan_intersect, plan_union};
 use crate::ops::source::Inputs;
 use crate::ops::{run, simd};
 use crate::{FrozenBitmap, FrozenBitmapView};
@@ -584,10 +584,11 @@ fn union_fold_keys<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
 
 
 fn union_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>]) {
-    let sum_card: u32 = refs.iter().map(|p| p.card).fold(0, u32::saturating_add);
+    // The plan already decided this key's accumulator form (its cap): a
+    // bitmap-sized slot means bitmap (or native-run) accumulation. Deriving it
+    // here from runtime refs could only disagree with the slot we were given.
     let total_runs: usize = refs.iter().map(|p| p.num_runs()).sum();
-    let any_bitmap = refs.iter().any(|p| p.typ == CT_BITMAP);
-    let needs_bitmap = any_bitmap || sum_card > UNION_DENSE_CARD || total_runs > MAX_RUNS;
+    let needs_bitmap = arena.slot_capacity(i) >= BITMAP_BYTES;
 
     if needs_bitmap && all_runs(refs) && total_runs <= MAX_RUNS {
         // Run ∪ Run stays a (coalesced) run container.
