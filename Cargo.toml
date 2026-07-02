@@ -42,6 +42,14 @@ path = "benchmarks/trees.rs"
 harness = false
 required-features = ["roaring"]
 
+# Per-tree corpus audit (plain harness, not criterion): reports every tree
+# where frostbit trails roaring by more than a threshold.
+[[bench]]
+name = "tree_audit"
+path = "benchmarks/tree_audit.rs"
+harness = false
+required-features = ["roaring"]
+
 # Keep 10M-element round-trip tests fast under `cargo test`.
 [profile.dev]
 opt-level = 1

@@ -12,7 +12,7 @@ import os
 import re
 
 ENGINES = ["frostbit", "frostbit_punched", "roaring", "roaring-simd"]
-GROUPS = ["intersect", "union", "diff", "tree", "holepunch", "shortcircuit"]
+GROUPS = ["intersect", "union", "diff", "tree", "corpus", "holepunch", "shortcircuit"]
 ROOT = "target/criterion"
 
 
