@@ -105,6 +105,77 @@ fn decomp(c: &mut Criterion) {
 #[cfg(not(feature = "internals"))]
 fn decomp(_c: &mut Criterion) {}
 
+// TEMP (profiling): branch-predictability sweep. Same element counts and block
+// counts per kernel; only the *pattern* differs — `alt` interleaves the sides
+// (advance branch strictly alternates, fully predictable), `rand` scatters
+// side membership (advance ~50/50 data-dependent). Overlap sweeps vary the
+// intersect/diff hit rate (emit-loop density). Deltas isolate branch stalls.
+#[cfg(feature = "internals")]
+fn branches(c: &mut Criterion) {
+    use frostbit::ops::simd as k;
+    const N: usize = 4096;
+    let mut st = 0xB4A2_C4E5_u64;
+
+    // Predictable: evens vs odds.
+    let a_alt: Vec<u16> = (0..N as u16).map(|i| i * 2).collect();
+    let b_alt: Vec<u16> = (0..N as u16).map(|i| i * 2 + 1).collect();
+
+    // Random advance, still disjoint: shuffle 0..2N, first N → a, rest → b.
+    let mut idx: Vec<u16> = (0..(2 * N) as u16).collect();
+    for i in (1..idx.len()).rev() {
+        idx.swap(i, (splitmix64(&mut st) as usize) % (i + 1));
+    }
+    let (mut a_rnd, mut b_rnd): (Vec<u16>, Vec<u16>) =
+        (idx[..N].to_vec(), idx[N..].to_vec());
+    a_rnd.sort_unstable();
+    b_rnd.sort_unstable();
+
+    // Overlap sweep partners (random advance): p% of b drawn from a.
+    let overlap = |p: usize, st: &mut u64| -> Vec<u16> {
+        let mut s = std::collections::BTreeSet::new();
+        let want_hits = N * p / 100;
+        while s.len() < want_hits {
+            s.insert(a_rnd[(splitmix64(st) as usize) % N]);
+        }
+        while s.len() < N {
+            let v = (splitmix64(st) % 65536) as u16;
+            if a_rnd.binary_search(&v).is_err() {
+                s.insert(v);
+            }
+        }
+        s.into_iter().collect()
+    };
+    let (b_p0, b_p50, b_p100) = (overlap(0, &mut st), overlap(50, &mut st), overlap(100, &mut st));
+
+    let mut out = vec![0u16; 2 * N];
+    let mut g = c.benchmark_group("branches");
+    for (name, a, b) in [
+        ("and/alt", &a_alt, &b_alt),
+        ("and/rand", &a_rnd, &b_rnd),
+        ("diff/alt", &a_alt, &b_alt),
+        ("diff/rand", &a_rnd, &b_rnd),
+        ("or/alt", &a_alt, &b_alt),
+        ("or/rand", &a_rnd, &b_rnd),
+        ("and/hit0", &a_rnd, &b_p0),
+        ("and/hit50", &a_rnd, &b_p50),
+        ("and/hit100", &a_rnd, &b_p100),
+        ("diff/hit50", &a_rnd, &b_p50),
+    ] {
+        g.bench_function(name, |bch| {
+            bch.iter(|| {
+                black_box(match name.split('/').next().unwrap() {
+                    "and" => k::array_intersect(a, b, &mut out),
+                    "diff" => k::array_diff(a, b, &mut out),
+                    _ => k::array_union(a, b, &mut out),
+                })
+            })
+        });
+    }
+    g.finish();
+}
+#[cfg(not(feature = "internals"))]
+fn branches(_c: &mut Criterion) {}
+
 fn bench(c: &mut Criterion) {
     let mut st = 0x0B5_0F75_u64;
     // 16 sparse-array inputs and 16 dense-bitmap inputs (phase-shifted to keep
@@ -138,6 +209,6 @@ criterion_group! {
         .sample_size(30)
         .warm_up_time(Duration::from_millis(1200))
         .measurement_time(Duration::from_secs(4));
-    targets = bench, decomp
+    targets = bench, decomp, branches
 }
 criterion_main!(benches);
