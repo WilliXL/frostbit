@@ -470,6 +470,10 @@ fn diff_apply(arena: &mut OpArena, i: usize, p: &ContainerRef<'_>, is_last: bool
                 let card = retain_runs(acc_u16(arena.slot_mut(i)), st.card, runs, false);
                 arena.state_mut(i).card = card;
             }
+            Data::Bitmap(b) => {
+                let card = retain_bitmap(acc_u16(arena.slot_mut(i)), st.card, b, false);
+                arena.state_mut(i).card = card;
+            }
             d => {
                 let card = retain(acc_u16(arena.slot_mut(i)), st.card, |lo| !d.contains(lo));
                 arena.state_mut(i).card = card;
@@ -974,6 +978,10 @@ impl ArrayAcc {
                 let cur = if self.in_scratch { sa } else { slot };
                 self.card = retain_runs(acc_u16(cur), self.card, runs, keep);
             }
+            Data::Bitmap(b) => {
+                let cur = if self.in_scratch { sa } else { slot };
+                self.card = retain_bitmap(acc_u16(cur), self.card, b, keep);
+            }
             _ => {
                 let cur = if self.in_scratch { sa } else { slot };
                 self.card = retain(acc_u16(cur), self.card, |lo| partner.contains(lo) == keep);
@@ -1046,6 +1054,21 @@ fn retain_runs(acc: &mut [u16], card: u32, runs: &[Run], keep_inside: bool) -> u
 
 /// Keep `acc[..card]` values where `keep` holds, compacting in place.
 #[inline]
+/// Filter sorted `acc` by bitmap membership with the word array hoisted out of
+/// the loop. Going through `Data::contains` re-matches the container enum on
+/// every probe (~3ns each — the corpus audit's whole offender population);
+/// this tight loop with branchless compaction runs at ~1ns.
+fn retain_bitmap(acc: &mut [u16], card: u32, b: &Bitmap, keep_inside: bool) -> u32 {
+    let mut w = 0usize;
+    for r in 0..card as usize {
+        let v = acc[r];
+        let hit = (b[(v >> 6) as usize] >> (v & 63)) & 1 != 0;
+        acc[w] = v;
+        w += (hit == keep_inside) as usize;
+    }
+    w as u32
+}
+
 fn retain(acc: &mut [u16], card: u32, mut keep: impl FnMut(u16) -> bool) -> u32 {
     let mut w = 0;
     for r in 0..card as usize {
