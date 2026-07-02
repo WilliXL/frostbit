@@ -71,6 +71,31 @@ fn featurize(spec: &Spec, f: &mut Feat) {
     }
 }
 
+/// Compact structural dump: `&`=AND `|`=OR `\\`=DIFF, leaves by pool index.
+fn dump(spec: &Spec, out: &mut String) {
+    match spec {
+        Spec::Leaf(i) => out.push_str(&i.to_string()),
+        Spec::And(cs) | Spec::Or(cs) => {
+            out.push(if matches!(spec, Spec::And(_)) { '&' } else { '|' });
+            out.push('(');
+            for (k, c) in cs.iter().enumerate() {
+                if k > 0 {
+                    out.push(',');
+                }
+                dump(c, out);
+            }
+            out.push(')');
+        }
+        Spec::Diff(a, b) => {
+            out.push_str("\\(");
+            dump(a, out);
+            out.push(',');
+            dump(b, out);
+            out.push(')');
+        }
+    }
+}
+
 fn main() {
     let pool = mixed_pool();
     let specs = corpus_specs(25_000, pool.len());
@@ -133,6 +158,13 @@ fn main() {
         "offender avg{:6.1} {:6.1} {:5.1} {:4.1} {:6.1}  [{:.1} {:.1} {:.1} {:.1}]  {:.0}",
         off.0, off.1, off.2, off.3, off.4, off.5[0], off.5[1], off.5[2], off.5[3], off.6
     );
+
+    println!("\nworst 5 structures:");
+    for &(i, fb, rb) in offenders.iter().take(5) {
+        let mut s = String::new();
+        dump(&specs[i], &mut s);
+        println!("  #{i} (fb {fb:.0} µs, rb {rb:.0} µs): {s}");
+    }
 
     println!("\nworst 30:");
     println!("  idx    fb µs    rb µs   delta  leaves depth ANDs ORs DIFFs [sm med den run] maxw");
