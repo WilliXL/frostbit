@@ -475,7 +475,13 @@ fn diff_apply(arena: &mut OpArena, i: usize, p: &ContainerRef<'_>, is_last: bool
                 arena.state_mut(i).card = card;
             }
             d => {
-                let card = retain(acc_u16(arena.slot_mut(i)), st.card, |lo| !d.contains(lo));
+                // Inline partner: stage its sorted lows and SIMD-merge.
+                let (cur, other, scratch) = arena.slot_pair_and_scratch(i);
+                let staged: &mut [u16] = bytemuck::cast_slice_mut(scratch);
+                let n = d.write_sorted(staged);
+                let src: &[u16] = &bytemuck::cast_slice(cur)[..st.card as usize];
+                let card = simd::array_diff(src, &staged[..n], bytemuck::cast_slice_mut(other)) as u32;
+                arena.flip_side(i);
                 arena.state_mut(i).card = card;
             }
         },
@@ -968,7 +974,7 @@ impl ArrayAcc {
     /// AND (`keep`) / DIFF (`!keep`) fold with one partner.
     fn fold(&mut self, arena: &mut OpArena, i: usize, partner: Data<'_>, keep: bool) {
         let (slot, scratch) = arena.slot_and_scratch(i);
-        let (sa, _) = scratch.split_at_mut(BITMAP_BYTES);
+        let (sa, sb) = scratch.split_at_mut(BITMAP_BYTES);
         match partner {
             Data::Array(b) => {
                 let kernel: fn(&[u16], &[u16], &mut [u16]) -> usize =
@@ -984,8 +990,17 @@ impl ArrayAcc {
                 self.card = retain_bitmap(acc_u16(cur), self.card, b, keep);
             }
             _ => {
-                let cur = if self.in_scratch { sa } else { slot };
-                self.card = retain(acc_u16(cur), self.card, |lo| partner.contains(lo) == keep);
+                // Inline partner: its lows are already sorted — stage them once
+                // and take the SIMD merge instead of a probe per element.
+                let staged: &mut [u16] = bytemuck::cast_slice_mut(sb);
+                let n = partner.write_sorted(staged);
+                let (src, dst): (&[u8], &mut [u8]) =
+                    if self.in_scratch { (sa, slot) } else { (slot, sa) };
+                let src: &[u16] = &bytemuck::cast_slice(src)[..self.card as usize];
+                let kernel: fn(&[u16], &[u16], &mut [u16]) -> usize =
+                    if keep { simd::array_intersect } else { simd::array_diff };
+                self.card = kernel(src, &staged[..n], bytemuck::cast_slice_mut(dst)) as u32;
+                self.in_scratch = !self.in_scratch;
             }
         }
     }
@@ -1070,17 +1085,6 @@ fn retain_bitmap(acc: &mut [u16], card: u32, b: &Bitmap, keep_inside: bool) -> u
     w as u32
 }
 
-fn retain(acc: &mut [u16], card: u32, mut keep: impl FnMut(u16) -> bool) -> u32 {
-    let mut w = 0;
-    for r in 0..card as usize {
-        let v = acc[r];
-        if keep(v) {
-            acc[w] = v;
-            w += 1;
-        }
-    }
-    w as u32
-}
 
 #[inline]
 fn set_bit(dst: &mut Bitmap, lo: u16) {

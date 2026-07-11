@@ -107,13 +107,27 @@ unsafe fn intersect_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
             vorrq_u16(vceqq_u16(va4, vb2), vceqq_u16(va4, vb3)),
         );
         let m = vorrq_u16(lo, vextq_u16::<4>(hi, hi));
-        // Fold the per-lane mask to an 8-bit set, then emit matched `a` lanes.
-        let mut bits = vaddvq_u16(vandq_u16(m, weights));
-        while bits != 0 {
-            let i = bits.trailing_zeros() as usize;
-            *out.get_unchecked_mut(k) = *a.get_unchecked(ia + i);
-            k += 1;
-            bits &= bits - 1;
+        // Fold the per-lane mask to an 8-bit set, then emit matched `a` lanes,
+        // compacted branchlessly by table shuffle (a per-hit loop is fine at
+        // sparse overlap but stalls when hits are dense).
+        let bits = vaddvq_u16(vandq_u16(m, weights)) as usize;
+        // Zero-hit blocks skip the emit entirely — at sparse overlap this
+        // branch is almost always false (predicted free); at dense overlap it
+        // is almost always true and the branchless table compaction runs.
+        if bits == 0 {
+        } else if k + 8 <= out.len() {
+            let shuf = vld1q_u8(super::array_diff::COMPACT[bits].as_ptr());
+            let packed = vqtbl1q_u8(vreinterpretq_u8_u16(va), shuf);
+            vst1q_u8(out.as_mut_ptr().add(k).cast(), packed);
+            k += (bits as u32).count_ones() as usize;
+        } else {
+            let mut b = bits as u32;
+            while b != 0 {
+                let i = b.trailing_zeros() as usize;
+                *out.get_unchecked_mut(k) = *a.get_unchecked(ia + i);
+                k += 1;
+                b &= b - 1;
+            }
         }
         // Advance the block whose max is smaller (both on a tie); take maxes from
         // the live registers, and reload only the advanced side.
@@ -226,13 +240,25 @@ unsafe fn intersect_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
         );
         let m = _mm_or_si128(lo, _mm_alignr_epi8::<8>(hi, hi));
         // Saturating-pack the 8 u16 lanes to bytes (0xFFFF→0xFF, 0→0), then a
-        // byte movemask gives the 8-bit lane set.
-        let mut bits = (_mm_movemask_epi8(_mm_packs_epi16(m, m)) & 0xFF) as u32;
-        while bits != 0 {
-            let i = bits.trailing_zeros() as usize;
-            *out.get_unchecked_mut(k) = *a.get_unchecked(ia + i);
-            k += 1;
-            bits &= bits - 1;
+        // byte movemask gives the 8-bit lane set; emit via branchless
+        // table-shuffle compaction (loop only at the output boundary).
+        let bits = (_mm_movemask_epi8(_mm_packs_epi16(m, m)) & 0xFF) as usize;
+        // See the NEON twin: zero-hit blocks skip; dense blocks compact
+        // branchlessly.
+        if bits == 0 {
+        } else if k + 8 <= out.len() {
+            let shuf = _mm_loadu_si128(super::array_diff::COMPACT[bits].as_ptr().cast());
+            let packed = _mm_shuffle_epi8(va, shuf);
+            _mm_storeu_si128(out.as_mut_ptr().add(k).cast(), packed);
+            k += (bits as u32).count_ones() as usize;
+        } else {
+            let mut b = bits as u32;
+            while b != 0 {
+                let i = b.trailing_zeros() as usize;
+                *out.get_unchecked_mut(k) = *a.get_unchecked(ia + i);
+                k += 1;
+                b &= b - 1;
+            }
         }
         let amax = _mm_extract_epi16::<7>(va) as u16;
         let bmax = _mm_extract_epi16::<7>(vb) as u16;
