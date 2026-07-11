@@ -97,6 +97,21 @@ fn decomp(c: &mut Criterion) {
     k.bench_function("fold16_onekey", |bch| {
         bch.iter(|| black_box(frostbit::ops::kernels::diff_into(&fv1)))
     });
+    // Partner-major-intersect trial control: if 32-key AND time ≈ 32× the
+    // 1-key AND time, key-major intersect has no memory pathology and the
+    // partner-major order (which would loosen the capacity clamps) has
+    // nothing to win.
+    let sparse32 = {
+        let mut st = 0x0B5_0F75_u64;
+        Set::new(&(0..16).map(|_| arrays(32, 800, &mut st)).collect::<Vec<_>>())
+    };
+    let fv32 = sparse32.views(16);
+    k.bench_function("and16_onekey", |bch| {
+        bch.iter(|| black_box(frostbit::ops::kernels::intersect_into(&fv1)))
+    });
+    k.bench_function("and16_32keys", |bch| {
+        bch.iter(|| black_box(frostbit::ops::kernels::intersect_into(&fv32)))
+    });
     k.bench_function(format!("fold16_onekey_{RB}"), |bch| {
         bch.iter(|| black_box(rb_diff(&sparse1.rbs[..16])))
     });
