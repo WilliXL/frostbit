@@ -186,10 +186,25 @@ impl<'a> FoldPlan<'a> {
             Op::Or => (PlanOp::Union, shape::union_shape(&shapes, &weights)),
             Op::Diff => unreachable!("combine is AND/OR only"),
         };
+        // Auto hole-punch: when this AND's intersected key set is narrower
+        // than some child's, a mask over the surviving keys provably skips
+        // dead blocks in the wider branches — derive it here, once, as part
+        // of the analysis. (Effective only if this node stays the root:
+        // splicing into a parent drops it, and the parent re-derives.)
+        let live = (op == Op::And
+            && arity >= 2
+            && shapes.iter().map(Vec::len).max().is_some_and(|w| shape.len() < w))
+        .then(|| {
+            let mut mask = KeyMask::empty();
+            for m in &shape {
+                mask.set(m.key);
+            }
+            Arc::new(mask)
+        });
         let after = steps.len() + 1;
         steps.push(Step::Combine(arity, shape::to_plan(pop, &shape)));
         patch_guards(&mut steps, after);
-        FoldPlan { steps, shape, max_depth: max_depth.max(base).max(1), live: None }
+        FoldPlan { steps, shape, max_depth: max_depth.max(base).max(1), live }
     }
 
     /// `lhs` minus `rhs` (never flattened — DIFF is not associative).
