@@ -58,10 +58,10 @@ Roaring implementations.
 Against both configurations of the standard Rust Roaring library, with
 all $n$-ary baseline calls routed through the library's documented
 \texttt{MultiOps} fast path, \fb{} wins 34 of a 2--16-way operation
-sweep's 36 cells against both builds: every sorted-array cell
-($1.25$--$12.2\times$), every packed-bitmap cell but a
-binary-difference tie, and every run-container cell but 16-way
-intersection ($0.87\times$, the single loss). End-to-end it evaluates
+sweep's 36 cells: every sorted-array cell ($1.25$--$12.2\times$),
+every packed-bitmap cell but a binary-difference tie, and every
+run-container cell but 16-way intersection ($0.87\times$, the single
+loss). End-to-end it evaluates
 a 25{,}000-tree filter corpus $2.7\times$ and $2.2\times$ faster, with
 per-mechanism ablations --- including rejected designs --- isolating
 the contribution of each planning decision. \fb{} is deployed as the
@@ -532,7 +532,7 @@ threshold is correct across fan-ins, because the re-streamed volume
 grows with $n$; we measured both failure directions: a low fixed
 threshold (256) converts the OR-groups of low-fan-in conjunctions into
 bitmaps their parent consumes more slowly ($+29\%$ on that shape), and
-promoting never strands wide unions in array form ($3.7\times$ on
+never promoting strands wide unions in array form ($3.7\times$ on
 4-way unions; Table~\ref{tab:abl}). At $n{=}4$ the derived threshold
 happens to land near CRoaring's 1024; the rules diverge everywhere else
 --- never promoting at $n \le 3$ where a fixed 1024 would, and
@@ -704,7 +704,7 @@ $1.26$--$2.9\times$ over SIMD), every packed-bitmap cell
 sweep's single loss.
 
 The run-container regime did not start this way, and its repair is a
-case study in the cost model of \S\ref{sec:intro}. Run cells carry
+case study in what the analysis pass itself costs. Run cells carry
 $\sim$18-byte payloads, so an earlier version lost the binary cells
 outright ($0.68\times$ at binary run difference): decomposition showed
 the planning walk alone was 282\,ns of the 781\,ns total, the fold
