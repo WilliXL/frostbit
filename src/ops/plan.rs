@@ -142,28 +142,60 @@ fn shrink_slot_bytes(card: u32) -> u32 {
 /// AND: output keys = ∩ of all inputs' keys. Per key, the result ⊆ the
 /// smallest-card input there, so execution seeds from it (expanding run/bitmap
 /// → array when card ≤ 4096) and only shrinks. cap = `shrink_slot_bytes(min_card)`.
+///
+/// Two walks, picked by key-set shape: when some input is narrower (or n = 2),
+/// drive by the fewest-container input and `advance_to` the rest — O(K_seed·n)
+/// instead of O(K_union·n), the difference on selective conjuncts; at uniform
+/// counts the flat min-scan is measurably cheaper per key.
 pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = slot_pool::take();
     if inputs.is_empty() {
         return Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES, double: false };
     }
+    let (mut seed, mut min_n, mut max_n) = (0, usize::MAX, 0);
+    for i in 0..inputs.len() {
+        let n = inputs.container_count(i);
+        if n < min_n {
+            (seed, min_n) = (i, n);
+        }
+        max_n = max_n.max(n);
+    }
     let mut scratch = FoldScratch::take();
     let (cursors, _) = scratch.borrow();
-    cursors.extend((0..inputs.len()).map(|i| inputs.cursor(i)));
 
-    loop {
-        let Some(key) = min_key(cursors) else { break };
-        let mut present = 0usize;
-        let mut min_card = u32::MAX;
-        for c in cursors.iter_mut() {
-            if c.peek_key() == Some(key) {
-                present += 1;
-                min_card = min_card.min(c.get().card);
-                c.advance();
+    if inputs.len() == 2 || min_n < max_n {
+        let mut driver = inputs.cursor(seed);
+        cursors.extend((0..inputs.len()).filter(|&i| i != seed).map(|i| inputs.cursor(i)));
+        while let Some(key) = driver.peek_key() {
+            let mut min_card = driver.get().card;
+            driver.advance();
+            let present = cursors.iter_mut().all(|c| {
+                let hit = c.advance_to(key);
+                if hit {
+                    min_card = min_card.min(c.get().card);
+                }
+                hit
+            });
+            if present {
+                slots.push(SlotPlan { key, capacity: shrink_slot_bytes(min_card) });
             }
         }
-        if present == inputs.len() {
-            slots.push(SlotPlan { key, capacity: shrink_slot_bytes(min_card) });
+    } else {
+        cursors.extend((0..inputs.len()).map(|i| inputs.cursor(i)));
+        loop {
+            let Some(key) = min_key(cursors) else { break };
+            let mut present = 0usize;
+            let mut min_card = u32::MAX;
+            for c in cursors.iter_mut() {
+                if c.peek_key() == Some(key) {
+                    present += 1;
+                    min_card = min_card.min(c.get().card);
+                    c.advance();
+                }
+            }
+            if present == inputs.len() {
+                slots.push(SlotPlan { key, capacity: shrink_slot_bytes(min_card) });
+            }
         }
     }
     Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES, double: false }

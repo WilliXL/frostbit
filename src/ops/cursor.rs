@@ -188,7 +188,13 @@ impl<'a> ContainerCursor<'a> {
 
     /// Advance until the current key ≥ `target`. Returns `true` if it equals it.
     /// Dead keys are skipped, so a hit is always a live key.
+    #[inline]
     pub fn advance_to(&mut self, target: u16) -> bool {
+        // Dense-overlap fast path: already resting on the target (which is
+        // live by the cursor invariant — `advance*` never rests on dead keys).
+        if self.peek_key() == Some(target) {
+            return true;
+        }
         while self.peek_key().is_some_and(|k| k < target) {
             self.advance_raw();
         }
