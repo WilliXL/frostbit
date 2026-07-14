@@ -51,13 +51,19 @@ cannot contribute to the result of the whole expression; and each
 operator's fold order is selected by comparing its proven accumulator
 footprint to the cache hierarchy. Representation and kernel choices are
 resolved by cost models over plan-derived quantities, including a
-fan-in-aware array-to-bitmap promotion rule that provably dominates the
-fixed cardinality thresholds used in deployed Roaring implementations.
+fan-in-aware array-to-bitmap promotion rule that dominates, under the
+calibrated model, the fixed cardinality thresholds used in deployed
+Roaring implementations.
 
-Against both configurations of the standard Rust Roaring library, \fb{}
-improves every operation shape of a 2--16-way sweep by
-$1.2$--$15.5\times$ (all but two cells against the library's SIMD build),
-and evaluates a 25{,}000-tree filter corpus $3.4\times$ and $2.25\times$
+Against both configurations of the standard Rust Roaring library, with
+all $n$-ary baseline calls routed through the library's documented
+\texttt{MultiOps} fast path, \fb{} wins every sorted-array cell of a
+2--16-way operation sweep by $1.2$--$12.8\times$ and every
+packed-bitmap cell of arity four and above by $1.05$--$3.7\times$
+(binary bitmap cells sit within $\pm 8\%$), and splits the
+run-container cells --- winning at mid arities and losing up to
+$1.7\times$ at the extremes --- while
+evaluating a 25{,}000-tree filter corpus $2.6\times$ and $2.2\times$
 faster end-to-end, with per-mechanism ablations --- including rejected
 designs --- isolating the contribution of each planning decision. \fb{}
 is deployed as the filtering substrate of a commercial web-scale search
@@ -85,24 +91,29 @@ Johnson~\cite{ameryahia2000} built a dynamic-programming optimizer that
 selects per-node algorithms and intermediate formats for boolean
 expression trees over RLE-compressed bitmaps; Kaser and
 Lemire~\cite{kaser2016} fitted cost formulas to choose evaluation
-strategies for multi-operand Roaring queries; Kim et
-al.~\cite{kim2018} select intersection algorithms per query from
-calibrated cost models in a production web search engine; and a
+strategies for multi-operand queries over word-aligned (EWAH)
+bitmaps; Kim et al.~\cite{kim2018} develop calibrated cost models for
+per-query intersection-algorithm selection in web search; and a
 theoretical line establishes worst-case-optimal evaluation of
 union-intersection expressions~\cite{chiniforooshan2005,bille2007}.
-All of these optimizers share a structural commitment: decisions are made
-\emph{dynamically}, per evaluation, against operand statistics, and the
-execution machinery beneath them allocates and sizes intermediate results
-as they materialize.
+These optimizers decide either immediately before each evaluation,
+from estimated operand statistics~\cite{ameryahia2000,kaser2016,
+kim2018}, or during it, adapting to observed
+selectivities~\cite{raman2007}; in both cases the execution machinery
+beneath them allocates and sizes intermediate results as they
+materialize, and none emits guarantees about the execution it has
+chosen.
 
 This paper examines the opposite point in the design space, motivated by
-the regime in which filtering actually runs in production: index segments
-are immutable artifacts of an indexing pipeline, and a filter expression
-is compiled once and then evaluated against many segments. In this
-setting, dynamic re-decision is overhead with no adaptivity benefit ---
-the operands are frozen --- and we show that the entire optimization
-surface can be discharged \emph{statically}, yielding plans that carry
-guarantees no dynamic optimizer provides:
+the regime in which filtering actually runs in production: index
+segments are immutable artifacts of an indexing pipeline, so every
+statistic a plan depends on --- each leaf's exact per-container key
+set, cardinality, and representation --- is exact, not estimated, and
+can never be invalidated. In this setting adaptivity has nothing to
+adapt to, and we show that the entire optimization surface can be
+discharged \emph{statically} at plan construction (whose cost is
+included in every measurement we report), yielding plans that carry
+guarantees no estimate-driven or adaptive optimizer provides:
 
 \begin{itemize}
 \item \textbf{Allocation-freeness as a plan-time invariant.} The analysis
@@ -150,12 +161,19 @@ Beneath the plan, representation and kernel selection are governed by
 explicit cost models over plan-derived quantities
 (\S\ref{sec:dispatch}); the kernels themselves synthesize the published
 state of the art~\cite{schlegel2011,inoue2014,lemire2016simd,diez2021}
-and are verified at parity with it, so that the evaluation isolates the
-value of the planning layer rather than kernel differences.
+and are measured at parity with the baseline's, so that end-to-end
+differences are attributable primarily to the planning layer rather
+than kernel quality (\S\ref{sec:eval}).
 
 \textbf{Contributions.}
 \textbf{C1.} A compilation scheme from boolean container-algebra
-expressions to proof-carrying plans: sound output shapes, per-container
+expressions to proof-carrying plans\footnote{The term is borrowed from
+proof-carrying code~\cite{necula1997} and is used in the same spirit as
+proof-carrying plans for AI planning~\cite{schwaab2019}: the artifact
+transports obligations discharged before execution. \fb's plans carry
+compiler-derived bounds enforced by construction and checked by
+assertion and stress testing, not independently verifiable
+certificates.}: sound output shapes, per-container
 capacity clamps with a case-analytic soundness argument, and a
 closed-form working-memory bound; allocation-free execution and in-place
 result serialization follow as invariants
@@ -185,9 +203,10 @@ Amer-Yahia--Johnson optimizer~\cite{ameryahia2000}, which plans boolean
 expression trees over RLE bitmaps by dynamic programming over
 per-node algorithm and format choices under density-based cost models.
 Kaser and Lemire~\cite{kaser2016} extend cost-based strategy selection
-to multi-operand Roaring queries (including heuristics for intermediate
-materialization), and Kim et al.~\cite{kim2018} deploy calibrated cost
-models that pick intersection algorithms per query in web search.
+to multi-operand queries over EWAH-compressed bitmaps (including
+heuristics for intermediate materialization), and Kim et
+al.~\cite{kim2018} build and validate calibrated cost models that pick
+intersection algorithms per query for web-search workloads.
 Adaptive execution takes the dynamic commitment further: Raman et
 al.~\cite{raman2007} interleave RID-list intersection strategies based
 on observed selectivities precisely because static plans mispredict.
@@ -196,21 +215,26 @@ union-intersection expressions~\cite{chiniforooshan2005,bille2007}, and
 semijoin-style liveness reasoning over query plans dates to
 Yannakakis~\cite{yannakakis1981}, recently revived as predicate
 transfer~\cite{predtransfer2024}. \fb{} occupies a point none of these
-target: in the frozen-segment regime it moves \emph{all} decisions to
-compile time and, beyond selecting algorithms, emits machine-checkable
-guarantees --- capacity clamps, allocation-freeness, liveness masks ---
-that dynamic optimizers by construction cannot promise before execution.
-The trade is explicit: \fb{} forgoes runtime adaptivity on interior
-results (\S\ref{sec:limitations}) in exchange for zero per-evaluation
-decision cost and static safety.
+target. Like the pre-execution optimizers it plans before evaluating,
+but from the \emph{exact} per-container metadata of frozen operands
+rather than estimated statistics, and its output is stronger than an
+algorithm selection: the plan carries discharged obligations ---
+capacity clamps, allocation-freeness, a closed-form memory bound,
+liveness masks --- that estimate-driven planners cannot emit (their
+decisions may be wrong and must remain revisable) and that adaptive
+executors by construction do not have before execution. The trade is
+explicit: \fb{} forgoes runtime adaptivity on interior results
+(\S\ref{sec:limitations}) in exchange for guarantees and an executor
+containing no decision code.
 
 \textbf{Compressed bitmap structures.} The word-aligned RLE family
 (BBC~\cite{antoshenkov1995}, WAH~\cite{wu2006}, PLWAH~\cite{deliege2010},
 CONCISE~\cite{colantonio2010}) optimizes space and bulk boolean
 throughput; sorting amplifies run lengths~\cite{lemire2010sorting}.
 Roaring~\cite{chambi2016,lemire2016roaring,lemire2018} introduced the
-two-level container design \fb{} adopts and remains wire-compatible
-with. Index-level designs --- variant indexes~\cite{oneil1997}, bitmap
+two-level container design \fb{} adopts; \fb's frozen format transcodes
+losslessly to and from portable Roaring serialization at container
+granularity. Index-level designs --- variant indexes~\cite{oneil1997}, bitmap
 join indices~\cite{oneil1995}, bit-sliced arithmetic~\cite{rinfret2001},
 design-space studies~\cite{chan1998} --- and updatable structures
 (UpBit~\cite{upbit2016}, TEB~\cite{teb2020,teb2022},
@@ -248,9 +272,13 @@ any operand byte is read.
 
 \textbf{Memory discipline in query engines.} Streaming and vectorized
 engines bound steady-state allocation
-operationally~\cite{trill2015,photon2022,boncz2005}, and cache-aware
+operationally~\cite{trill2015,photon2022,boncz2005}; cache-aware
 cost modeling of operator behavior is
-classical~\cite{wolf1991,manegold2002}. \fb's contribution here is the
+classical~\cite{wolf1991,manegold2002}; plan-time memory-requirement
+characterization has lineage in continuous queries over
+streams~\cite{arasu2002}; and representation selection for filter
+evaluation has a recent vectorized-execution
+treatment~\cite{ngom2021}. \fb's contribution here is the
 coupling: the memory bound is an artifact of the same analysis that
 proves capacity soundness, and serialization reuses the working arena
 (\S\ref{sec:inplace}), which we have not seen documented for bitmap
@@ -289,19 +317,24 @@ validated once at the trust boundary and read zero-copy thereafter,
 including from memory maps.
 
 A filter expression is a tree over frozen-bitmap leaves with operators
-$\wedge$, $\vee$ (arbitrary arity), and $\setminus$ (binary).
-Same-operator edges are flattened at construction; an operator's
-\emph{fan-in} $n$ is its flattened operand count. $K(v)$ denotes the key
-set node $v$ can emit; hats ($\widehat{\cdot}$) denote plan-time upper
-bounds.
+$\wedge$, $\vee$ (arbitrary arity), and $\setminus$ (binary). Bare
+complement is not an operator; filter languages reach the engine with
+negation normalized into difference against an enclosing operand or an
+explicit universe bitmap. Same-operator edges are flattened at
+construction; an operator's \emph{fan-in} $n$ is its flattened operand
+count. $K(v)$ denotes the key set node $v$ can emit; hats
+($\widehat{\cdot}$) denote plan-time upper bounds.
 
 \section{Plan Compilation}
 \label{sec:analysis}
 
 Expression construction and analysis are fused: each combinator splices
 its children's programs into a flat post-order instruction sequence and
-computes the artifacts below bottom-up. A plan is constructed once and
-evaluated arbitrarily many times.
+computes the artifacts below bottom-up. A plan is specific to its
+operand set --- leaf shapes are exact properties of particular frozen
+bitmaps --- and may be evaluated against them arbitrarily many times;
+construction is cheap enough to sit on the query path and is included
+in every end-to-end measurement in \S\ref{sec:eval}.
 
 \subsection{Shapes}
 \label{sec:shapes}
@@ -355,7 +388,12 @@ bytes.
 \begin{proof}[Argument]
 By case analysis on the accumulator ladder. For $\wedge$, the
 accumulator seeds from the per-key minimum-cardinality operand and only
-shrinks; all reachable states (array, run, bitmap) fit
+shrinks. One executor invariant carries the run case: a run encoding
+($2{+}4\rho$ bytes) can exceed its array encoding when $\rho$
+approaches the cardinality, so run-form accumulators are permitted only
+inside $\B$-clamped slots, where any $\rho \le \rho_{\max}$ container
+fits; under an array clamp the executor expands a run seed to array
+form at seeding. Every reachable state then fits
 $\sigma(\widehat{\mathrm{card}}_k)$. For $\setminus$, untouched keys are
 verbatim copies; touched keys shrink from the left operand, and
 run-splitting states, bounded by
@@ -430,8 +468,8 @@ relative to engines that copy results out of working memory.
 Profiling during development isolated this term directly: \fb's 16-way
 difference fold was already faster than the baseline ($185$ vs.\
 $190\us$) while the end-to-end operation was slower ($206$ vs.\
-$190\us$); the difference was the output copy, and eliminating it
-reversed every large-result cell (\S\ref{sec:eval:abl}).
+$190\us$); the gap was exactly the output copy, and eliminating it
+recovered the fold's advantage end-to-end (\S\ref{sec:eval:abl}).
 
 \section{Representation and Kernel Selection}
 \label{sec:dispatch}
@@ -452,6 +490,7 @@ $c_s$ & per value scattered into a bitmap & $1.2\nsu$ \\
 $c_0$ & bitmap clear + population count (fixed) & $450\nsu$ \\
 $c_p$ & bitmap membership probe (hoisted loop) & $1.0\nsu$ \\
 $c_g$ & galloping search probe (incl.\ mispredictions) & $2.5\nsu$ \\
+$c_x$ & bitmap$\to$array result extraction, per value & $0.25\nsu$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -474,20 +513,29 @@ cardinality $s$,
 \begin{equation}
 C_{\mathrm{arr}}(n,s) \approx c_m\,s\Big(\tfrac{n+1}{2}-\tfrac1n\Big),
 \qquad
-C_{\mathrm{bmp}}(s) \approx c_0 + c_s\,s,
+C_{\mathrm{bmp}}(s) \approx c_0 + (c_s{+}c_x)\,s,
 \end{equation}
-whose crossover yields no promotion at $n \le 3$ for any
-$s \le A_{\max}$ and thresholds $s \gtrsim 980, 480, 200$ at
-$n = 4, 5, 8$, encoded as
+where $c_x$ is the bitmap-to-array conversion of the finished
+accumulator, incurred precisely where promotion is contested
+($s \le A_{\max}$, so the result re-materializes in array form). The
+crossover yields no promotion at $n \le 3$ for any $s \le A_{\max}$ and
+thresholds $s \gtrsim 970, 480, 200$ at $n = 4, 5, 8$, encoded as
 $\textsc{promote}(n,s) \equiv n \ge 4 \wedge s(n-3) > 1000$. Deployed
-Roaring implementations promote at a fixed cardinality
-(256 in CRoaring's deferred aggregation~\cite{chambi2016,lemire2018});
-the fixed rule is dominated in both directions, and we measured both
-failures: tuned low it converts the OR-groups of low-fan-in
-conjunctions into bitmaps their parent consumes more slowly ($+29\%$ on
-that shape); tuned high it strands wide unions in array form
-($3.7\times$ on 4-way unions; Table~\ref{tab:abl}). Fan-in bounds come
-from the weighted shapes of \S\ref{sec:shapes}.
+Roaring implementations promote at fixed thresholds independent of
+fan-in: CRoaring's lazy aggregation defers conversion until an
+accumulator exceeds 1024 values, and the container specification
+converts at 4096~\cite{chambi2016,lemire2018}. Under the model no fixed
+threshold is correct across fan-ins, because the re-streamed volume
+grows with $n$; we measured both failure directions: a low fixed
+threshold (256) converts the OR-groups of low-fan-in conjunctions into
+bitmaps their parent consumes more slowly ($+29\%$ on that shape), and
+promoting never strands wide unions in array form ($3.7\times$ on
+4-way unions; Table~\ref{tab:abl}). At $n{=}4$ the derived threshold
+happens to land near CRoaring's 1024; the rules diverge everywhere else
+--- never promoting at $n \le 3$ where a fixed 1024 would, and
+promoting at $s \approx 200$ at $n{=}8$ where a fixed 1024 waits
+$5\times$ too long. Fan-in bounds come from the weighted shapes of
+\S\ref{sec:shapes}.
 
 \textbf{Run containers} fold natively (run$\times$run intersection,
 union, and run-splitting difference on typed interval slices) inside
@@ -570,9 +618,10 @@ in place. The streamed-bytes reduction is
 \end{equation}
 which for the selective-filter benchmark of \S\ref{sec:eval} (one
 4-key conjunct against four 256-key disjunction legs) removes 98\% of
-input bytes and yields $7.35\us$ versus $241\us$ unpruned; enabling the
+input bytes and yields $7.4\us$ versus $241\us$ unpruned; enabling the
 automatic derivation improved the full 25k-tree corpus by 15.3\%
-($p < 0.05$). Relative to runtime masking for flat
+(criterion's change-detection test over 10 samples of 20\,s,
+$p < 0.05$). Relative to runtime masking for flat
 intersections~\cite{roaringjava} and scan-side zone-map
 pruning~\cite{moerkotte1998,snowflake2016}, the analysis here is static,
 applies to arbitrary operator trees, and carries a soundness argument
@@ -588,9 +637,12 @@ into enclosing plans. Within operators, intersection fuses population
 count into the word-level AND and abandons a key on emptiness; per-key
 folds order operands most-selective-first; partner-major passes skip
 dead slots. A filter containing a contradictory subexpression evaluates
-in $133\nsu$ against $392\us$ for the baseline, since the expensive
-sibling is never executed; we report this as a property of guard
-placement rather than a headline result.
+in $147\nsu$ against $773\us$ for the stronger baseline build, since
+the expensive sibling is never executed; we report this as a property
+of guard
+placement rather than a headline result, and note the baseline's
+operator API offers no way to express sibling short-circuiting, so the
+row compares expressiveness rather than kernels.
 
 \section{Memory Discipline}
 \label{sec:memory}
@@ -605,20 +657,26 @@ back. Steady-state evaluation therefore performs zero heap allocations
 --- verified by sampling profiles in which the allocator does not
 appear --- and first use on a thread allocates once, after which
 buffers circulate. The comparable baseline cost is visible in its own
-profiles: approximately 6\% of the Rust Roaring library's runtime in our
-workloads is allocator time, before any tail-latency effects.
+profiles: under the library's pairwise operators our workloads
+attribute roughly 6\% of runtime to the allocator (its \texttt{MultiOps}
+aggregation path allocates less, via copy-on-write container borrowing,
+but is not allocation-free), before any tail-latency effects.
 
 \section{Evaluation}
 \label{sec:eval}
 
-\textbf{Setup.} Apple M-series (aarch64/NEON); stable Rust for \fb{} and
-the default baseline, nightly for the baseline's \texttt{simd} feature;
-criterion medians over 30 samples $\times$ 4\,s per benchmark (corpus:
-10 $\times$ 20\,s), typical confidence half-widths under 2\%. Baselines:
-Rust \texttt{roaring} 0.11.4 in both configurations --- the default
-build (scalar array kernels; what stable-toolchain users run) and the
-nightly-only \texttt{simd} build --- interleaved by a two-pass runner
-into one report. All \fb{} tree measurements include plan construction.
+\textbf{Setup.} Apple M4 Pro (aarch64/NEON); rustc 1.96.0 for \fb{} and
+the default baseline, rustc 1.98.0-nightly for the baseline's
+\texttt{simd} feature; criterion medians over 30 samples $\times$ 4\,s
+per benchmark (corpus: 10 $\times$ 20\,s), typical confidence
+half-widths under 2\%. Baselines: Rust \texttt{roaring} 0.11.4 in both
+configurations --- the default build (scalar array kernels; what
+stable-toolchain users run) and the nightly-only \texttt{simd} build ---
+interleaved by a two-pass runner into one report. All $n$-ary baseline
+calls go through the library's \texttt{MultiOps} trait, its documented
+fast path for merging many bitmaps (lazy copy-on-write promotion,
+largest-first ordering); binary nodes use the pairwise operators. All
+\fb{} tree measurements include plan construction.
 Correctness: differential suites against Roaring (random trees, pruned
 trees, run containers, 10M-element round trips) and the 11.6k-case
 clamp stress; every configuration reported here passes all suites.
@@ -626,30 +684,41 @@ clamp stress; every configuration reported here passes all suites.
 \subsection{Operation sweep}
 
 Table~\ref{tab:sweep} reports the full 2--16-way sweep over three
-container regimes. Against the default build \fb{} improves every cell
-by $1.2$--$15.5\times$; against the SIMD build every cell but two at
-16-way, which sit within noise ($0.98\times$, $0.99\times$).
+container regimes; all 36 cells of all three systems come from one
+interleaved run. \fb{} wins every sorted-array cell against both
+builds ($1.2$--$12.8\times$ over default, $1.2$--$2.8\times$ over
+SIMD) and every packed-bitmap cell of arity four and above
+($1.05$--$3.7\times$); the three binary bitmap cells sit within
+$\pm 8\%$ of both builds. The run-container regime splits: \fb{} wins
+mid-arity cells (up to $1.6\times$), ties at 8-way, and loses the
+binary cells and 16-way intersection --- worst $0.58\times$ at
+$\wedge$/16 on long-run inputs, and $0.68\times$ at binary run
+difference, where \fb's fixed plan-and-arena cost is visible at
+sub-microsecond scale. We report the losses alongside the wins: they
+bound where the native-run fold policy pays, and revisiting that
+policy against \texttt{MultiOps}' aggregation strategy is concrete
+future work.
 
 \begin{table*}[t]
 \caption{Full operation sweep, medians in \textmu s: \fb{} / Roaring
-default / Roaring \texttt{simd}. Sparse = 32-key arrays (800/key);
-dense = 16-key bitmaps (5000/key); runs = 16-key run containers.
-\fb{} values reflect the complete system.}
+default / Roaring \texttt{simd}, $n$-ary baseline calls via
+\texttt{MultiOps}. Sparse = 32-key arrays (800/key); dense = 16-key
+bitmaps (5000/key); runs = 16-key run containers.}
 \label{tab:sweep}
 \small
 \begin{tabular}{llrrrr}
 \toprule
 op & regime & 2-way & 4-way & 8-way & 16-way \\
 \midrule
-$\wedge$ & sparse & 10.4 / 63.5 / 13.9 & 14.2 / 82.3 / 24.6 & 16.7 / 73.0 / 24.7 & 20.4 / 73.3 / 25.1 \\
-$\wedge$ & dense & 15.2 / 18.3 / 17.8 & 13.6 / 22.9 / 21.5 & 12.4 / 22.5 / 22.1 & 14.8 / 22.8 / 22.3 \\
-$\wedge$ & runs & 0.91 / 1.25 / 1.21 & 1.60 / 3.10 / 3.10 & 2.70 / 4.60 / 4.40 & 4.70 / 4.80 / 4.70 \\
-$\vee$ & sparse & 46.7 / 89.5 / 62.7 & 54.9 / 517.6 / 272.8 & 117.1 / 1200 / 789 & 227.0 / 1390 / 956.6 \\
-$\vee$ & dense & 5.20 / 8.20 / 8.10 & 9.90 / 18.3 / 18.3 & 20.8 / 39.0 / 38.8 & 42.4 / 80.0 / 79.4 \\
-$\vee$ & runs & 0.92 / 1.40 / 1.30 & 1.60 / 3.30 / 3.30 & 3.00 / 7.10 / 7.20 & 5.60 / 11.4 / 11.5 \\
-$\setminus$ & sparse & 11.5 / 122.3 / 12.9 & 31.5 / 480.5 / 35.6 & 71.6 / 1110 / 80.2 & 188.0 / 2310 / 183.7 \\
-$\setminus$ & dense & 5.80 / 8.00 / 8.10 & 48.4 / 61.0 / 62.0 & 53.3 / 158 / 155 & 65.7 / 280.6 / 277.6 \\
-$\setminus$ & runs & 0.75 / 0.95 / 0.94 & 1.20 / 2.20 / 2.20 & 2.00 / 5.00 / 5.10 & 3.60 / 9.70 / 9.90 \\
+$\wedge$ & sparse & 10.7 / 51.0 / 17.0 & 14.2 / 62.9 / 28.4 & 16.6 / 61.0 / 28.4 & 20.6 / 59.1 / 28.5 \\
+$\wedge$ & dense & 15.3 / 16.5 / 16.5 & 13.6 / 19.5 / 19.8 & 12.4 / 19.8 / 20.1 & 14.7 / 19.9 / 20.0 \\
+$\wedge$ & runs & 0.90 / 0.85 / 0.86 & 1.60 / 1.90 / 2.00 & 2.70 / 2.70 / 2.70 & 4.60 / 2.70 / 2.70 \\
+$\vee$ & sparse & 46.4 / 100.1 / 82.3 & 55.4 / 176.0 / 157.4 & 115.9 / 141.6 / 142.3 & 209.5 / 289.6 / 284.2 \\
+$\vee$ & dense & 5.20 / 5.30 / 5.20 & 10.0 / 11.6 / 11.5 & 20.7 / 23.9 / 24.2 & 42.2 / 48.7 / 49.5 \\
+$\vee$ & runs & 0.98 / 0.92 / 0.93 & 1.70 / 2.20 / 2.20 & 3.10 / 4.90 / 4.80 & 5.90 / 7.30 / 7.50 \\
+$\setminus$ & sparse & 11.7 / 60.8 / 17.9 & 31.6 / 362.6 / 51.1 & 73.1 / 934.0 / 127.4 & 169.2 / 1980 / 302.3 \\
+$\setminus$ & dense & 5.80 / 5.80 / 5.60 & 48.1 / 50.5 / 50.5 & 54.0 / 137.0 / 135.0 & 66.9 / 248.1 / 250.4 \\
+$\setminus$ & runs & 0.82 / 0.56 / 0.58 & 1.20 / 1.00 / 1.00 & 2.10 / 2.10 / 2.10 & 3.50 / 3.70 / 3.80 \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -661,27 +730,29 @@ End-to-end evaluation uses 25{,}000 deterministic random filter trees
 per-tree shape profiles spanning deep conjunction chains, flat 100-way
 disjunctions, and difference-heavy composites; 100 trees pinned to both
 extremes), each built, planned, and materialized per iteration.
-\fb: \textbf{2.63\,s} (9.5K trees/s); default baseline 9.06\,s
-($3.45\times$); SIMD baseline 5.92\,s ($2.25\times$).
+\fb: \textbf{2.69\,s} (9.3K trees/s); default baseline 6.96\,s
+($2.59\times$); SIMD baseline 5.96\,s ($2.22\times$).
 Table~\ref{tab:trees} reports named shapes bracketing production
 patterns.
 
 \begin{table}[t]
 \caption{Filter-tree shapes, medians (\textmu s); plan construction
-included.}
+included. On \emph{selective} the baseline's pairwise operators beat
+its \texttt{MultiOps} path ($\approx$0.85\,ms in a pairwise-baseline
+run); \fb's pruning multiple exceeds $100\times$ against either.}
 \label{tab:trees}
 \small
 \begin{tabular}{lrrr}
 \toprule
 shape & \fb & R & R$^{\text{simd}}$ \\
 \midrule
-conj5 (nested $\wedge$, flattens 5-way) & \textbf{34.1} & 315 & 80.3 \\
-filter (base $\wedge$ OR-group $\wedge$ $\neg$lang) & \textbf{17.5} & 41.0 & 43.7 \\
-dnf ($\vee$ of $\wedge$-groups) & \textbf{51.8} & 582 & 78.6 \\
-cnf3 ($\wedge$ of $\vee$-groups) & \textbf{72.6} & 331 & 102 \\
-selective (statically pruned) & \textbf{7.35} & 846 & 374 \\
-contradiction (guarded) & \textbf{0.133} & 820 & 392 \\
-25k corpus (seconds) & \textbf{2.63} & 9.06 & 5.92 \\
+conj5 (nested $\wedge$, flattens 5-way) & \textbf{36.0} & 301 & 71.0 \\
+filter (base $\wedge$ OR-group $\wedge$ $\neg$lang) & \textbf{17.8} & 41.6 & 41.3 \\
+dnf ($\vee$ of $\wedge$-groups) & \textbf{53.2} & 625 & 116 \\
+cnf3 ($\wedge$ of $\vee$-groups) & \textbf{72.8} & 118 & 102 \\
+selective (statically pruned) & \textbf{7.4} & 1600 & 1450 \\
+contradiction (guarded) & \textbf{0.147} & 872 & 773 \\
+25k corpus (seconds) & \textbf{2.69} & 6.96 & 5.96 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -713,8 +784,10 @@ nothing at sparse overlap. Third, the fold-order controls
 where the memory system rewards it.
 
 \begin{table}[t]
-\caption{Ablation ledger (measured; kept above the line, rejected
-below).}
+\caption{Ablation ledger (kept above the line, rejected below).
+Entries are measurements at the time each mechanism landed; the
+surrounding system has since moved, so endpoints differ from the
+final-system tables.}
 \label{tab:abl}
 \small
 \begin{tabular}{p{5.4cm}r}
@@ -743,10 +816,13 @@ partner-major $\wedge$ & no gain (linear-scaling control) \\
 
 Because the claims concern the planning layer, we verified the kernels
 are not the explanation: per-block throughput against the baseline's
-SIMD kernels at equal work shows parity to $+16\%$, consistent with
-attributing the end-to-end differences of
-Tables~\ref{tab:sweep}--\ref{tab:trees} to planning, pruning, and memory
-discipline.
+SIMD kernels at equal work sits within a $0$ to $+16\%$ band. A kernel
+edge of that size cannot account for the multiples in
+Tables~\ref{tab:sweep}--\ref{tab:trees}, but it is not zero; the
+sharper attribution experiment --- the baseline's kernels running under
+\fb's plans --- is future work, and until then the end-to-end
+differences are attributable primarily, not exclusively, to planning,
+pruning, and memory discipline.
 
 \subsection{Limitations}
 \label{sec:limitations}
@@ -774,14 +850,16 @@ under concurrency.
 \fb{} is deployed as the filtering substrate of Exa, a commercial
 web-scale search engine, where every boolean filter predicate compiles
 to a \fb{} expression evaluated against frozen per-segment bitmaps
-served from memory maps. The deployment exercises the design as
-intended --- plans compiled once per query and replayed across
-segments; immutable segments produced by the indexing pipeline;
-allocation-free steady-state evaluation --- and motivated the original
-design constraints, in particular the removal of allocator traffic from
-the tail. A quantitative production characterization (tail-latency
-distributions, filter-shape statistics, fleet-scale resource accounting)
-is beyond the scope of this paper.
+served from memory maps. Plans are per-(expression, segment) --- the
+analysis runs against each segment's exact leaf metadata, which is what
+makes its guarantees possible, and its cost sits on the query path
+exactly as in every measurement of \S\ref{sec:eval}. The deployment
+exercises the design as intended --- immutable segments produced by an
+indexing pipeline, allocation-free steady-state evaluation --- and
+motivated the original design constraints, in particular the removal
+of allocator traffic from the tail. A quantitative production
+characterization (tail-latency distributions, filter-shape statistics,
+fleet-scale resource accounting) is beyond the scope of this paper.
 
 \section{Conclusion}
 
@@ -791,12 +869,15 @@ dynamically can be discharged entirely at plan time, and doing so yields
 guarantees dynamic schemes cannot offer: allocation-free execution under
 a closed-form memory bound, sound static pruning at container
 granularity across arbitrary expression trees, and fold orders selected
-from proven footprints. On kernels held at parity with the published
-state of the art, these plan-time guarantees account for
-$1.2$--$15.5\times$ per operation and $2.25$--$3.45\times$ end-to-end
-against the standard Rust Roaring library. The system, its differential
-and stress suites, the 25k-tree corpus, and the audit tooling are
-open source.
+from proven footprints. On kernels measured at parity with the
+baseline's, these plan-time guarantees account for the bulk of
+$1.2$--$12.8\times$ per sorted-array operation and
+$2.2$--$2.6\times$ end-to-end against the standard Rust Roaring
+library's documented fast paths, with the run-container losses of
+\S\ref{sec:eval} bounding where \fb's static policies currently pay.
+The system, its differential
+and stress suites, the 25k-tree corpus, and the audit tooling are open
+source.\footnote{\url{https://github.com/WilliXL/frostbit}}
 
 \begin{thebibliography}{99}
 \small
@@ -824,6 +905,9 @@ and optimizations. \emph{Information Processing \& Management} 31(6),
 \bibitem{moffat1996} A. Moffat, J. Zobel. Self-indexing inverted files
 for fast text retrieval. \emph{ACM TOIS} 14(4), 1996.
 
+\bibitem{necula1997} G. C. Necula. Proof-carrying code. \emph{POPL},
+1997.
+
 \bibitem{oneil1997} P. O'Neil, D. Quass. Improved query performance with
 variant indexes. \emph{SIGMOD}, 1997.
 
@@ -846,17 +930,15 @@ compressed bitmaps. \emph{VLDB}, 2000.
 \bibitem{demaine2000} E. D. Demaine, A. L\'opez-Ortiz, J. I. Munro.
 Adaptive set intersections, unions, and differences. \emph{SODA}, 2000.
 
-\bibitem{moffat2000} A. Moffat, L. Stuiver. Binary interpolative coding
-for effective index compression. \emph{Inf. Retrieval} 3(1), 2000.
-
 \bibitem{rinfret2001} D. Rinfret, P. O'Neil, E. O'Neil. Bit-sliced index
 arithmetic. \emph{SIGMOD}, 2001.
 
+\bibitem{arasu2002} A. Arasu, B. Babcock, S. Babu, J. McAlister,
+J. Widom. Characterizing memory requirements for queries over
+continuous data streams. \emph{PODS}, 2002.
+
 \bibitem{manegold2002} S. Manegold, P. Boncz, M. Kersten. Generic
 database cost models for hierarchical memory systems. \emph{VLDB}, 2002.
-
-\bibitem{anh2005} V. N. Anh, A. Moffat. Inverted index compression using
-word-aligned binary codes. \emph{Inf. Retrieval} 8(1), 2005.
 
 \bibitem{boncz2005} P. Boncz, M. Zukowski, N. Nes. MonetDB/X100:
 hyper-pipelining query execution. \emph{CIDR}, 2005.
@@ -867,9 +949,6 @@ evaluation. \emph{ICALP}, 2005.
 
 \bibitem{wu2006} K. Wu, E. J. Otoo, A. Shoshani. Optimizing bitmap
 indices with efficient compression. \emph{ACM TODS} 31(1), 2006.
-
-\bibitem{zukowski2006} M. Zukowski, S. H\'eman, N. Nes, P. Boncz.
-Super-scalar RAM-CPU cache compression. \emph{ICDE}, 2006.
 
 \bibitem{barbay2006} J. Barbay, A. L\'opez-Ortiz, T. Lu. Faster adaptive
 set intersections for text searching. \emph{WEA}, 2006.
@@ -883,10 +962,6 @@ application to index anding. \emph{SIGMOD}, 2007.
 
 \bibitem{wu2009} K. Wu et al. FastBit: interactively searching massive
 data. \emph{J.\ Phys.: Conf.\ Ser.} 180, 2009.
-
-\bibitem{yan2009} H. Yan, S. Ding, T. Suel. Inverted index compression
-and query processing with optimized document ordering. \emph{WWW},
-2009.
 
 \bibitem{colantonio2010} A. Colantonio, R. Di Pietro. CONCISE:
 compressed 'n' composable integer set. \emph{Inf. Process. Lett.}
@@ -911,9 +986,6 @@ intersection for inverted indexing. \emph{ACM TOIS} 29(1), 2010.
 S. Shivakumar, M. Tolton, T. Vassilakis. Dremel: interactive analysis
 of web-scale datasets. \emph{PVLDB} 3(1), 2010.
 
-\bibitem{schlegel2010} B. Schlegel, R. Gemulla, W. Lehner. Fast integer
-compression using SIMD instructions. \emph{DaMoN}, 2010.
-
 \bibitem{ding2011konig} B. Ding, A. C. K\"onig. Fast set intersection
 in memory. \emph{PVLDB} 4(4), 2011.
 
@@ -923,9 +995,6 @@ using block-max indexes. \emph{SIGIR}, 2011.
 \bibitem{schlegel2011} B. Schlegel, T. Willhalm, W. Lehner. Fast
 sorted-set intersection using SIMD instructions. \emph{ADMS@VLDB},
 2011.
-
-\bibitem{vigna2013} S. Vigna. Quasi-succinct indices. \emph{WSDM},
-2013.
 
 \bibitem{bitweaving2013} Y. Li, J. M. Patel. BitWeaving: fast scans for
 main memory data processing. \emph{SIGMOD}, 2013.
@@ -944,19 +1013,12 @@ G. Merlino, D. Ganguli. Druid: a real-time analytical data store.
 intersection with SIMD instructions by reducing branch mispredictions.
 \emph{PVLDB} 8(3), 2014.
 
-\bibitem{ottaviano2014} G. Ottaviano, R. Venturini. Partitioned
-Elias-Fano indexes. \emph{SIGIR}, 2014.
-
 \bibitem{veldhuizen2014} T. L. Veldhuizen. Leapfrog Triejoin: a simple,
 worst-case optimal join algorithm. \emph{ICDT}, 2014.
 
 \bibitem{byteslice2015} Z. Feng, E. Lo, B. Kao, W. Xu. ByteSlice:
 pushing the envelop of main memory data processing with a new storage
 layout. \emph{SIGMOD}, 2015.
-
-\bibitem{lemire2015decoding} D. Lemire, L. Boytsov. Decoding billions
-of integers per second through vectorization. \emph{Softw. Pract. Exp.}
-45(1), 2015.
 
 \bibitem{trill2015} B. Chandramouli, J. Goldstein, M. Barnett,
 R. DeLine, D. Fisher, J. C. Platt, J. F. Terwilliger, J. Wernsing.
@@ -981,10 +1043,6 @@ Pract. Exp.} 46(6), 2016.
 \bibitem{upbit2016} M. Athanassoulis, Z. Yan, S. Idreos. UpBit:
 scalable in-memory updatable bitmap indexing. \emph{SIGMOD}, 2016.
 
-\bibitem{dhulipala2016} L. Dhulipala, I. Kabiljo, B. Karrer,
-G. Ottaviano, S. Pupyrev, A. Shalita. Compressing graphs and indexes
-with recursive graph bisection. \emph{KDD}, 2016.
-
 \bibitem{aberger2016} C. R. Aberger, A. Lamb, S. Tu, A. N\"otzli,
 K. Olukotun, C. R\'e. EmptyHeaded: a relational engine for graph
 processing. \emph{SIGMOD}, 2016.
@@ -1008,9 +1066,6 @@ compression. \emph{SIGMOD}, 2017.
 M. Curmei, S. Elnikety, Y. He. BitFunnel: revisiting signatures for
 search. \emph{SIGIR}, 2017.
 
-\bibitem{pibiri2017} G. E. Pibiri, R. Venturini. Clustered Elias-Fano
-indexes. \emph{ACM TOIS} 36(1), 2017.
-
 \bibitem{lemire2018} D. Lemire, O. Kaser, N. Kurz, L. Deri, C. O'Hara,
 F. Saint-Jacques, G. Ssi-Yan-Kai. Roaring bitmaps: implementation of an
 optimized software library. \emph{Softw. Pract. Exp.} 48(4), 2018.
@@ -1033,19 +1088,20 @@ Sketches: a scan accelerator for rapid and robust predicate evaluation.
 \bibitem{procella2019} B. Chattopadhyay et al. Procella: unifying
 serving and analytical data at YouTube. \emph{PVLDB} 12(12), 2019.
 
-\bibitem{mackenzie2019} J. Mackenzie, A. Mallia, M. Petri,
-J. S. Culpepper, T. Suel. Compressing inverted indexes with recursive
-graph bisection: a reproducibility study. \emph{ECIR}, 2019.
+\bibitem{schwaab2019} C. Schwaab, E. Komendantskaya, A. Hill, F. Farka,
+R. P. A. Petrick, J. Wells, K. Hammond. Proof-carrying plans.
+\emph{PADL}, 2019.
 
 \bibitem{teb2020} H. Lang, A. Beischl, V. Leis, P. Boncz, T. Neumann,
 A. Kemper. Tree-encoded bitmaps. \emph{SIGMOD}, 2020.
 
+\bibitem{ngom2021} A. Ngom, P. Menon, M. Butrovich, L. Ma, W. S. Lim,
+T. C. Mowry, A. Pavlo. Filter representation in vectorized query
+execution. \emph{DaMoN}, 2021.
+
 \bibitem{fesia2020} J. Zhang, Y. Lu, D. G. Spampinato, F. Franchetti.
 FESIA: a fast and SIMD-efficient set intersection approach on modern
 CPUs. \emph{ICDE}, 2020.
-
-\bibitem{pibiri2021} G. E. Pibiri, R. Venturini. Techniques for
-inverted index compression. \emph{ACM Comput. Surv.} 53(6), 2021.
 
 \bibitem{diez2021} G. D\'iez-Ca\~nas. Faster-than-native alternatives
 for x86 VP2INTERSECT instructions. arXiv:2112.06342, 2021.
@@ -1064,9 +1120,9 @@ HERO: a hierarchical set partitioning and join framework for speeding
 up the set intersection over graphs. \emph{Proc. ACM Manag. Data
 (SIGMOD)}, 2024.
 
-\bibitem{predtransfer2024} Y. Yang, H. Zhang, P. Padmanabha Iyer,
-X. Yu. Predicate transfer: efficient pre-filtering on multi-join
-queries. \emph{CIDR}, 2024.
+\bibitem{predtransfer2024} Y. Yang, H. Zhao, X. Yu, P. Koutris.
+Predicate transfer: efficient pre-filtering on multi-join queries.
+\emph{CIDR}, 2024.
 
 \bibitem{clickhouse2024} R. Schulze, T. Schreiber, I. Yatsishin,
 R. Dahimene, A. Milovidov. ClickHouse --- lightning fast analytics for

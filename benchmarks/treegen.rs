@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use frostbit::BitmapExpr;
-use roaring::RoaringBitmap;
+use roaring::{MultiOps, RoaringBitmap};
 
 use crate::common::*;
 
@@ -40,23 +40,13 @@ pub fn build_fb<'a>(spec: &Spec, p: &'a Set) -> BitmapExpr<'a> {
     }
 }
 
+/// N-ary groups go through `MultiOps` (the library's documented fast path);
+/// binary diff stays the pairwise operator.
 pub fn eval_rb(spec: &Spec, p: &Set) -> RoaringBitmap {
     match spec {
         Spec::Leaf(i) => p.rbs[*i].clone(),
-        Spec::And(cs) => {
-            let mut acc = eval_rb(&cs[0], p);
-            for c in &cs[1..] {
-                acc = &acc & &eval_rb(c, p);
-            }
-            acc
-        }
-        Spec::Or(cs) => {
-            let mut acc = RoaringBitmap::new();
-            for c in cs {
-                acc = &acc | &eval_rb(c, p);
-            }
-            acc
-        }
+        Spec::And(cs) => cs.iter().map(|c| eval_rb(c, p)).intersection(),
+        Spec::Or(cs) => cs.iter().map(|c| eval_rb(c, p)).union(),
         Spec::Diff(a, b) => &eval_rb(a, p) - &eval_rb(b, p),
     }
 }

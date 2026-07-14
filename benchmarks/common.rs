@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use frostbit::{FrozenBitmap, FrozenBitmapView};
-use roaring::RoaringBitmap;
+use roaring::{MultiOps, RoaringBitmap};
 
 /// Bench-ID label for the roaring competitor in this build: its scalar default
 /// or its nightly `simd` kernels, depending on the compiled feature set.
@@ -129,30 +129,19 @@ impl Set {
     }
 }
 
-// Roaring N-way folds (first-minus-rest for diff), matching the frostbit ops.
+// Roaring N-way ops via `MultiOps` — the library's documented fast path for
+// merging many bitmaps (first-minus-rest for diff), matching the frostbit ops.
 
 pub fn rb_and(r: &[RoaringBitmap]) -> RoaringBitmap {
-    let mut a = r[0].clone();
-    for b in &r[1..] {
-        a = &a & b;
-    }
-    a
+    r.iter().intersection()
 }
 
 pub fn rb_or(r: &[RoaringBitmap]) -> RoaringBitmap {
-    let mut a = RoaringBitmap::new();
-    for b in r {
-        a = &a | b;
-    }
-    a
+    r.iter().union()
 }
 
 pub fn rb_diff(r: &[RoaringBitmap]) -> RoaringBitmap {
-    let mut a = r[0].clone();
-    for b in &r[1..] {
-        a = &a - b;
-    }
-    a
+    r.iter().difference()
 }
 
 pub fn fb_vec(b: &FrozenBitmap) -> Vec<u32> {
