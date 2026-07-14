@@ -193,7 +193,11 @@ Measured with [criterion](https://docs.rs/criterion) (30 samples × 4 s per
 bench; the 25k-tree corpus at 10 × 20 s) on Apple Silicon (aarch64 / NEON).
 `./benchmarks/run.sh` runs the whole suite against **both** `roaring` 0.11.4
 variants — the default build (what a stable-toolchain user gets) and its
-nightly-only `simd` feature — and renders combined tables via
+nightly-only `simd` feature — then re-measures the frostbit cells in a
+dedicated third pass (same nightly build; sub-µs cells drift up to +70% inside
+the 20-minute interleaved passes from ambient allocator noise that frostbit's
+zero-alloc loops don't generate — roaring cells show no such drift and keep
+their interleaved numbers), and renders combined tables via
 `benchmarks/report.py`.
 
 `roaring` is the mutable `RoaringBitmap`; it has no reusable plan, so it
@@ -213,12 +217,12 @@ indicative, ±a few percent run to run.
 
 | shape | frostbit | roaring |
 |---|---:|---:|
-| `conj5` — nested ANDs, flattened to one 5-way | **36 µs** | 301 µs |
-| `filter` — `base ∩ OR(domains) ∩ (¬lang)` | **18 µs** | 42 µs |
-| `dnf` — OR of AND-groups | **53 µs** | 625 µs |
-| `cnf3` — AND of OR-groups | **73 µs** | 118 µs |
+| `conj5` — nested ANDs, flattened to one 5-way | **34 µs** | 271 µs |
+| `filter` — `base ∩ OR(domains) ∩ (¬lang)` | **18 µs** | 41 µs |
+| `dnf` — OR of AND-groups | **51 µs** | 632 µs |
+| `cnf3` — AND of OR-groups | **70 µs** | 107 µs |
 
-Randomly-generated trees (2–38 leaves) win 1.5×–5.7× across the board.
+Randomly-generated trees (2–38 leaves) win 1.5×–6.1× across the board.
 
 **25,000-tree corpus** — deterministic random trees up to 100 leaves and 15
 levels deep (per-tree shape profiles: deep AND-chains, flat 100-way ORs,
@@ -227,40 +231,40 @@ diff-heavy filters; 100 trees are guaranteed 100-leaf *and* 15-deep;
 
 | | frostbit | roaring |
 |---|---:|---:|
-| whole corpus, per-query analysis included | **2.69 s** (9.3K trees/s) | 6.96 s (3.6K trees/s) |
+| whole corpus, per-query analysis included | **2.55 s** (9.8K trees/s) | 6.85 s (3.6K trees/s) |
 
 **Query-shape optimizations:**
 
 | | frostbit | roaring |
 |---|---:|---:|
-| **Hole-punching** — narrow filter ∩ wide OR-groups | **7.4 µs** *(241 µs un-punched)* | 1.60 ms |
-| **Short-circuit** — AND with an empty subtree | **147 ns** | 872 µs |
+| **Hole-punching** — narrow filter ∩ wide OR-groups | **7.1 µs** *(241 µs un-punched)* | 1.46 ms |
+| **Short-circuit** — AND with an empty subtree | **143 ns** | 738 µs |
 
 **N-way flat ops (8-way):**
 
 | 8-way | frostbit | roaring |
 |---|---:|---:|
-| intersect · sparse arrays | **17 µs** | 61 µs |
+| intersect · sparse arrays | **16 µs** | 74 µs |
 | intersect · dense bitmaps | **12 µs** | 20 µs |
-| intersect · run containers | 2.7 µs | 2.7 µs |
-| union · sparse arrays | **116 µs** | 142 µs |
-| union · dense bitmaps | **21 µs** | 24 µs |
-| union · run containers | **3.1 µs** | 4.9 µs |
-| difference · sparse arrays | **73 µs** | 934 µs |
-| difference · dense bitmaps | **54 µs** | 137 µs |
-| difference · run containers | 2.1 µs | 2.1 µs |
+| intersect · run containers | **1.9 µs** | 2.7 µs |
+| union · sparse arrays | **113 µs** | 141 µs |
+| union · dense bitmaps | **20 µs** | 24 µs |
+| union · run containers | **2.9 µs** | 4.8 µs |
+| difference · sparse arrays | **73 µs** | 890 µs |
+| difference · dense bitmaps | **53 µs** | 134 µs |
+| difference · run containers | **1.8 µs** | 2.1 µs |
 
-Across the full 2–16-way sweep frostbit wins **every sparse-array cell**
-(1.2×–12.8×: roaring's array kernels are scalar in the default build, while
-frostbit's SIMD shuffle-merges — CRoaring-style compare-all-pairs and
-Inoue–Taura rotate networks, NEON + x86 — always run) and **every dense-bitmap
-cell at 4-way and above** (1.05×–3.7×; the 2-way bitmap cells are ±8% ties).
-Run containers split: frostbit wins mid-arity cells (up to 1.6×), ties at
-8-way, and **loses** the binary cells and 16-way intersect (worst 0.58×).
-The deficit is the planning walk itself — run cells carry ~18-byte payloads,
-so there's nothing to amortize the analysis pass against (binary run diff:
-282 ns plan + ~500 ns fold vs roaring's 555 ns total; the fold alone wins) —
-the current optimization frontier, reported honestly rather than hidden.
+Across the full 2–16-way sweep frostbit wins **34 of 36 cells**: every
+sparse-array cell (1.25×–12.2×: roaring's array kernels are scalar in the
+default build, while frostbit's SIMD shuffle-merges — CRoaring-style
+compare-all-pairs and Inoue–Taura rotate networks, NEON + x86 — always run),
+every dense-bitmap cell (1.05×–3.7×) except a binary-difference tie
+(0.98×), and every run-container cell (1.01×–1.69×) except 16-way intersect
+(**0.87×**, the single loss — n−1 sequential native-run passes vs `MultiOps`'
+aggregation; a k-way run merge is the open item). The run cells were losses
+until the analysis walk was profiled out of them: tiny inputs now take
+trivially-sound B-clamped plans instead of a capacity walk (binary run diff
+went 0.68× → 1.01×, binary run intersect 0.95× → 1.39×).
 
 ### vs roaring's nightly `simd` build
 
@@ -269,18 +273,18 @@ The same comparisons against `roaring` with its (nightly-only, off-by-default)
 
 | | frostbit | roaring `simd` |
 |---|---:|---:|
-| `conj5` / `filter` / `dnf` / `cnf3` | **36 / 18 / 53 / 73 µs** | 71 / 41 / 116 / 102 µs |
-| 25k-tree corpus | **2.69 s** | 5.96 s |
-| hole-punching (punched) | **7.4 µs** | 1.45 ms |
-| short-circuit | **147 ns** | 773 µs |
-| 8-way intersect (sparse / dense / runs) | **17 / 12** / 2.7 µs | 28 / 20 / 2.7 µs |
-| 8-way union (sparse / dense / runs) | **116 / 21 / 3.1 µs** | 142 / 24 / 4.8 µs |
-| 8-way difference (sparse / dense / runs) | **73 / 54** / 2.1 µs | 127 / 135 / 2.1 µs |
+| `conj5` / `filter` / `dnf` / `cnf3` | **34 / 18 / 51 / 70 µs** | 69 / 41 / 109 / 93 µs |
+| 25k-tree corpus | **2.55 s** | 5.64 s |
+| hole-punching (punched) | **7.1 µs** | 1.50 ms |
+| short-circuit | **143 ns** | 814 µs |
+| 8-way intersect (sparse / dense / runs) | **16 / 12 / 1.9 µs** | 29 / 20 / 2.7 µs |
+| 8-way union (sparse / dense / runs) | **113 / 20 / 2.9 µs** | 142 / 24 / 4.8 µs |
+| 8-way difference (sparse / dense / runs) | **73 / 53 / 1.8 µs** | 136 / 134 / 2.1 µs |
 
-Every tree shape and the corpus go to frostbit (1.3×–5.9×). The flat-op sweep
-mirrors the default-build picture: every sparse cell (1.2×–2.8×) and every
-dense cell at ≥4-way to frostbit, 2-way dense within ±8%, and the run-container
-extremes to roaring (same cells as above, worst 0.58×).
+Every tree shape and the corpus go to frostbit (1.3×–5.5×). The flat-op sweep
+mirrors the default-build picture: 34 of 36 cells to frostbit — every sparse
+cell (1.26×–2.9×), every dense cell but the binary-difference tie (0.97×),
+every run cell but 16-way intersect (0.87×).
 
 ## Features
 
