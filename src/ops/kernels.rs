@@ -6,17 +6,38 @@ use crate::container::{as_bitmap_mut, Bitmap, Data, Run};
 use crate::format::*;
 use crate::ops::arena::{OpArena, SlotState};
 use crate::ops::cursor::{ContainerRef, FoldScratch};
-use crate::ops::plan::{plan_diff, plan_intersect, plan_union};
+use crate::ops::plan::{plan_diff, plan_intersect, plan_trivial, plan_union, Op};
 use crate::ops::source::Inputs;
 use crate::ops::{run, simd};
 use crate::{FrozenBitmap, FrozenBitmapView};
 
 // --- intersection -----------------------------------------------------------
 
+/// Tiny-input one-shot gate: below this, the capacity walk dominates the fold
+/// (run cells carry ~18-byte payloads), so ∧/\ skip it via [`plan_trivial`].
+/// The count cap bounds the trivial arena (`keys × B`).
+const TRIVIAL_MAX_BYTES: usize = 16 << 10;
+const TRIVIAL_MAX_KEYS: usize = 32;
+
+fn trivial(views: &[FrozenBitmapView<'_>], drive: usize) -> bool {
+    views[drive].num_containers() <= TRIVIAL_MAX_KEYS
+        && views.iter().map(|v| v.as_bytes().len()).sum::<usize>() <= TRIVIAL_MAX_BYTES
+}
+
 /// N-way intersection (AND). Driven by the input with the fewest containers:
 /// only its keys are visited, and the others are `advance_to`-skipped to each —
 /// so a selective conjunct never forces a full walk of the large inputs.
 pub fn intersect(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+    if !views.is_empty() {
+        let seed = (0..views.len()).min_by_key(|&i| views[i].num_containers()).unwrap();
+        if trivial(views, seed) {
+            let plan = plan_trivial(Op::Intersect, views, seed);
+            let mut arena = OpArena::from_plan(&plan);
+            crate::ops::plan::recycle(plan);
+            intersect_fold(&mut arena, views);
+            return arena.serialize();
+        }
+    }
     intersect_into(views).serialize()
 }
 
@@ -314,6 +335,13 @@ fn run_acc_to_bitmap(arena: &mut OpArena, s: usize) {
 
 /// N-way difference: `inputs[0]` minus the rest.
 pub fn diff(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+    if !views.is_empty() && trivial(views, 0) {
+        let plan = plan_trivial(Op::Diff, views, 0);
+        let mut arena = OpArena::from_plan(&plan);
+        crate::ops::plan::recycle(plan);
+        diff_fold(&mut arena, views);
+        return arena.serialize();
+    }
     diff_into(views).serialize()
 }
 

@@ -72,6 +72,22 @@ pub(crate) fn recycle(plan: Plan) {
     slot_pool::put(plan.slots);
 }
 
+/// Capacity-analysis-free plan for tiny inputs: slots = input `seed`'s keys,
+/// all `B`-clamped. Sound because every ∧/\ fold state fits a bitmap-sized
+/// slot (the shrink caps only ever tighten this), and the key set is a
+/// superset of the output's (unclaimed slots serialize to nothing). Not for
+/// ∨, whose per-key clamp doubles as the promotion decision.
+pub(crate) fn plan_trivial<I: Inputs + ?Sized>(op: Op, inputs: &I, seed: usize) -> Plan {
+    debug_assert!(!matches!(op, Op::Union));
+    let mut slots = slot_pool::take();
+    let mut c = inputs.cursor(seed);
+    while let Some(key) = c.peek_key() {
+        slots.push(SlotPlan { key, capacity: BITMAP_BYTES as u32 });
+        c.advance();
+    }
+    Plan { op, slots, scratch_bytes: SCRATCH_BYTES, double: false }
+}
+
 impl Plan {
     #[inline]
     pub fn num_slots(&self) -> usize {
