@@ -116,6 +116,23 @@ fn decomp(c: &mut Criterion) {
         bch.iter(|| black_box(rb_diff(&sparse1.rbs[..16])))
     });
     k.finish();
+
+    // Run-container loss cells (vs MultiOps): plan / plan+fold / full split, so
+    // the fixed machinery (plan Vecs, arena init, serialize) is separable from
+    // the run kernels themselves.
+    let mut runs = Set::new(&(0..16).map(|i| run_ranges(16, 4, 6000, i * 1500)).collect::<Vec<_>>());
+    runs.optimize_roaring();
+    let (rv2, rv16) = (runs.views(2), runs.views(16));
+    let mut g = c.benchmark_group("decomp_runs");
+    g.bench_function("diff2/plan", |b| b.iter(|| black_box(frostbit::ops::plan::plan_diff(&rv2))));
+    g.bench_function("diff2/into", |b| b.iter(|| black_box(frostbit::ops::kernels::diff_into(&rv2))));
+    g.bench_function("diff2/full", |b| b.iter(|| black_box(difference_fast(&rv2))));
+    g.bench_function(format!("diff2/{RB}"), |b| b.iter(|| black_box(rb_diff(&runs.rbs[..2]))));
+    g.bench_function("and16/plan", |b| b.iter(|| black_box(frostbit::ops::plan::plan_intersect(&rv16))));
+    g.bench_function("and16/into", |b| b.iter(|| black_box(frostbit::ops::kernels::intersect_into(&rv16))));
+    g.bench_function("and16/full", |b| b.iter(|| black_box(intersect_fast(&rv16))));
+    g.bench_function(format!("and16/{RB}"), |b| b.iter(|| black_box(rb_and(&runs.rbs[..16]))));
+    g.finish();
 }
 #[cfg(not(feature = "internals"))]
 fn decomp(_c: &mut Criterion) {}

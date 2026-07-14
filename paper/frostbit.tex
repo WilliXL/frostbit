@@ -691,13 +691,16 @@ SIMD) and every packed-bitmap cell of arity four and above
 ($1.05$--$3.7\times$); the three binary bitmap cells sit within
 $\pm 8\%$ of both builds. The run-container regime splits: \fb{} wins
 mid-arity cells (up to $1.6\times$), ties at 8-way, and loses the
-binary cells and 16-way intersection --- worst $0.58\times$ at
-$\wedge$/16 on long-run inputs, and $0.68\times$ at binary run
-difference, where \fb's fixed plan-and-arena cost is visible at
-sub-microsecond scale. We report the losses alongside the wins: they
-bound where the native-run fold policy pays, and revisiting that
-policy against \texttt{MultiOps}' aggregation strategy is concrete
-future work.
+binary cells and 16-way intersection (worst $0.58\times$).
+Decomposing the binary run-difference loss is instructive: of \fb's
+781\,ns, the planning walk alone is 282\,ns, the fold including arena
+setup is $\approx$500\,ns --- at parity with the baseline's entire
+operation (555\,ns) --- and in-place serialization measures at noise.
+Run cells carry $\sim$18-byte payloads, so there is no data volume to
+amortize the analysis against: these cells isolate the price of the
+plan, which every other cell repays. Fusing the planning walk into
+the fold for one-shot calls, and thinning per-key fold machinery that
+16-way run intersection also exposes, is concrete future work.
 
 \begin{table*}[t]
 \caption{Full operation sweep, medians in \textmu s: \fb{} / Roaring

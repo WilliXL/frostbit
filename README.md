@@ -256,8 +256,10 @@ frostbit's SIMD shuffle-merges — CRoaring-style compare-all-pairs and
 Inoue–Taura rotate networks, NEON + x86 — always run) and **every dense-bitmap
 cell at 4-way and above** (1.05×–3.7×; the 2-way bitmap cells are ±8% ties).
 Run containers split: frostbit wins mid-arity cells (up to 1.6×), ties at
-8-way, and **loses** the binary cells and 16-way intersect to `MultiOps`'
-aggregation (worst 0.58× at 16-way run intersect, 0.68× at binary run diff) —
+8-way, and **loses** the binary cells and 16-way intersect (worst 0.58×).
+The deficit is the planning walk itself — run cells carry ~18-byte payloads,
+so there's nothing to amortize the analysis pass against (binary run diff:
+282 ns plan + ~500 ns fold vs roaring's 555 ns total; the fold alone wins) —
 the current optimization frontier, reported honestly rather than hidden.
 
 ### vs roaring's nightly `simd` build
