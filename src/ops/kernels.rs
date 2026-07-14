@@ -23,7 +23,9 @@ pub fn intersect(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
 /// AND, folded into a (pooled) arena left for the caller to fold further or
 /// serialize — the tree evaluator chains these without a byte round-trip.
 pub fn intersect_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
-    let mut arena = OpArena::from_plan(&plan_intersect(inputs));
+    let plan = plan_intersect(inputs);
+    let mut arena = OpArena::from_plan(&plan);
+    crate::ops::plan::recycle(plan);
     intersect_fold(&mut arena, inputs);
     arena
 }
@@ -133,7 +135,9 @@ pub fn union(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
 
 /// OR, folded into a (pooled) arena for the caller to chain or serialize.
 pub fn union_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
-    let mut arena = OpArena::from_plan(&plan_union(inputs));
+    let plan = plan_union(inputs);
+    let mut arena = OpArena::from_plan(&plan);
+    crate::ops::plan::recycle(plan);
     union_fold(&mut arena, inputs);
     arena
 }
@@ -315,7 +319,9 @@ pub fn diff(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
 
 /// DIFF, folded into a (pooled) arena for the caller to chain or serialize.
 pub fn diff_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
-    let mut arena = OpArena::from_plan(&plan_diff(inputs));
+    let plan = plan_diff(inputs);
+    let mut arena = OpArena::from_plan(&plan);
+    crate::ops::plan::recycle(plan);
     diff_fold(&mut arena, inputs);
     arena
 }

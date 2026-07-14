@@ -7,7 +7,7 @@
 //! passes through under the execution contract documented per op below.
 
 use crate::format::*;
-use crate::ops::cursor::ContainerCursor;
+use crate::ops::cursor::{ContainerCursor, FoldScratch};
 use crate::ops::source::Inputs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +39,38 @@ pub struct Plan {
 
 /// Scratch the kernels need: one bitmap accumulator + one run/bitmap temp.
 const SCRATCH_BYTES: usize = 2 * BITMAP_BYTES;
+
+mod slot_pool {
+    use std::cell::RefCell;
+
+    use super::SlotPlan;
+
+    const MAX_POOLED: usize = 8;
+    thread_local! {
+        static POOL: RefCell<Vec<Vec<SlotPlan>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn take() -> Vec<SlotPlan> {
+        POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default()
+    }
+
+    pub(super) fn put(mut v: Vec<SlotPlan>) {
+        v.clear();
+        POOL.with(|p| {
+            let mut p = p.borrow_mut();
+            if p.len() < MAX_POOLED {
+                p.push(v);
+            }
+        });
+    }
+}
+
+/// Return a one-shot plan's slot buffer to the per-thread pool. Tree plans
+/// live inside a `FoldPlan` and simply never call this.
+#[inline]
+pub(crate) fn recycle(plan: Plan) {
+    slot_pool::put(plan.slots);
+}
 
 impl Plan {
     #[inline]
@@ -111,17 +143,19 @@ fn shrink_slot_bytes(card: u32) -> u32 {
 /// smallest-card input there, so execution seeds from it (expanding run/bitmap
 /// → array when card ≤ 4096) and only shrinks. cap = `shrink_slot_bytes(min_card)`.
 pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
-    let mut slots = Vec::new();
+    let mut slots = slot_pool::take();
     if inputs.is_empty() {
         return Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES, double: false };
     }
-    let mut cursors: Vec<ContainerCursor<'_>> = (0..inputs.len()).map(|i| inputs.cursor(i)).collect();
+    let mut scratch = FoldScratch::take();
+    let (cursors, _) = scratch.borrow();
+    cursors.extend((0..inputs.len()).map(|i| inputs.cursor(i)));
 
     loop {
-        let Some(key) = min_key(&cursors) else { break };
+        let Some(key) = min_key(cursors) else { break };
         let mut present = 0usize;
         let mut min_card = u32::MAX;
-        for c in &mut cursors {
+        for c in cursors.iter_mut() {
             if c.peek_key() == Some(key) {
                 present += 1;
                 min_card = min_card.min(c.get().card);
@@ -141,20 +175,22 @@ pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
 /// of the merged-array, coalesced-run, and largest-single-input sizes. Every
 /// union key gets a slot up front, so a fold never creates one.
 pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
-    let mut slots = Vec::new();
+    let mut slots = slot_pool::take();
     if inputs.is_empty() {
         return Plan { op: Op::Union, slots, scratch_bytes: SCRATCH_BYTES, double: false };
     }
-    let mut cursors: Vec<ContainerCursor<'_>> = (0..inputs.len()).map(|i| inputs.cursor(i)).collect();
+    let mut scratch = FoldScratch::take();
+    let (cursors, _) = scratch.borrow();
+    cursors.extend((0..inputs.len()).map(|i| inputs.cursor(i)));
 
     loop {
-        let Some(key) = min_key(&cursors) else { break };
+        let Some(key) = min_key(cursors) else { break };
         let mut sum_card = 0u32;
         let mut total_runs = 0usize;
         let mut any_bitmap = false;
         let mut max_single = 0usize;
         let mut n_present = 0usize;
-        for c in &mut cursors {
+        for c in cursors.iter_mut() {
             if c.peek_key() == Some(key) {
                 let cr = c.get();
                 sum_card = sum_card.saturating_add(cr.card);
@@ -186,12 +222,14 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
 /// RHS is copied verbatim (cap = its stored bytes); a key present in some RHS
 /// can only shrink from A (cap = `shrink_slot_bytes(A_card)`).
 pub fn plan_diff<I: Inputs + ?Sized>(inputs: &I) -> Plan {
-    let mut slots = Vec::new();
+    let mut slots = slot_pool::take();
     if inputs.is_empty() {
         return Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES, double: false };
     }
     let mut a = inputs.cursor(0);
-    let mut rhs: Vec<ContainerCursor<'_>> = (1..inputs.len()).map(|i| inputs.cursor(i)).collect();
+    let mut scratch = FoldScratch::take();
+    let (rhs, _) = scratch.borrow();
+    rhs.extend((1..inputs.len()).map(|i| inputs.cursor(i)));
 
     while let Some(key) = a.peek_key() {
         let cr = a.get();
