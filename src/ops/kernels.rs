@@ -90,8 +90,20 @@ pub fn intersect_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
 fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>]) {
     // Seed from the smallest-card container; its representation fixes the
     // accumulator (array or bitmap) for the whole fold, so it never outgrows
-    // the slot. AND only ever shrinks it.
-    let seed = (0..refs.len()).min_by_key(|&j| refs[j].card).unwrap();
+    // the slot. AND only ever shrinks it. One scan gathers the seed and the
+    // native-run precondition together.
+    let (mut seed, mut min_card) = (0usize, u32::MAX);
+    let (mut runs_ok, mut truns) = (true, 0usize);
+    for (j, r) in refs.iter().enumerate() {
+        if r.card < min_card {
+            (seed, min_card) = (j, r.card);
+        }
+        if runs_ok && r.typ == CT_RUN {
+            truns += r.num_runs();
+        } else {
+            runs_ok = false;
+        }
+    }
 
     if refs[seed].card as usize <= ARRAY_MAX_SIZE {
         // Array accumulator. The first array×array fold merges the source
@@ -122,7 +134,7 @@ fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'
         }
         let card = acc.finish(arena, i);
         arena.record(key, CT_ARRAY, card, i, card as usize * 2);
-    } else if all_runs(refs) && total_runs(refs) <= MAX_RUNS {
+    } else if runs_ok && truns <= MAX_RUNS {
         // Dense run containers stay runs (O(runs), not O(bitmap)).
         let (card, bytes) = run_fold(arena, i, &refs[0], &refs[1..], run::intersect);
         arena.record(key, CT_RUN, card, i, bytes);
@@ -854,7 +866,7 @@ fn run_fold(
     i: usize,
     seed: &ContainerRef<'_>,
     partners: &[ContainerRef<'_>],
-    op: fn(&[Run], &[Run], &mut [Run]) -> (usize, u32),
+    op: impl Fn(&[Run], &[Run], &mut [Run]) -> (usize, u32),
 ) -> (u32, usize) {
     let (slot, scratch) = arena.slot_and_scratch(i);
     let (a, b) = scratch.split_at_mut(BITMAP_BYTES);
