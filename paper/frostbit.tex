@@ -64,8 +64,13 @@ run-container cell but 16-way intersection ($0.87\times$, the single
 loss). End-to-end it evaluates
 a 25{,}000-tree filter corpus $2.7\times$ and $2.2\times$ faster, with
 per-mechanism ablations --- including rejected designs --- isolating
-the contribution of each planning decision. \fb{} is deployed as the
-filtering substrate of a commercial web-scale search engine.
+the contribution of each planning decision. Against the production
+substrate it succeeds at a commercial web-scale search engine --- an
+equally-tuned engine of the same lineage that re-derives its decisions
+during each evaluation --- \fb{} wins 33 of 36 operation cells and
+$3$--$8\%$ end-to-end, with tail shapes improving up to $31\times$:
+the measured value of carrying decisions in the plan rather than
+re-deriving them.
 \end{abstract}
 
 \maketitle
@@ -186,9 +191,10 @@ cardinality thresholds, and footprint-gated fold-order selection,
 including the control experiments that scoped where each applies
 (\S\ref{sec:dispatch},~\S\ref{sec:foldorder}).
 \textbf{C4.} An evaluation against both configurations of the Rust
-Roaring library with complete per-mechanism ablations including negative
-results, a 25{,}000-tree corpus, and a per-tree audit methodology;
-\fb{} is deployed in production and released as open source
+Roaring library and against the production substrate \fb{} succeeds,
+with complete per-mechanism ablations including negative results, a
+25{,}000-tree corpus, and a per-tree audit methodology; \fb{} is
+released as open source
 (\S\ref{sec:eval},~\S\ref{sec:deployment}).
 
 \section{Related Work}
@@ -858,10 +864,13 @@ Four limitations bound the present evaluation. (1)~All measurements are
 from one aarch64 microarchitecture; the x86 (SSE) kernel ports compile
 and are algorithmically identical, but their performance and the
 transfer of Table~\ref{tab:constants}'s constants are unvalidated.
-(2)~The baseline family is the Rust Roaring library; CRoaring ships
-per-pair dispatch heuristics its Rust port lacks, so a CRoaring
+(2)~The library baseline family is the Rust Roaring library; CRoaring
+ships per-pair dispatch heuristics its Rust port lacks, so a CRoaring
 comparison with per-mechanism attribution is required before the
-end-to-end multiples can be read as pure planning-layer gains.
+library multiples can be read as pure planning-layer gains. The
+incumbent comparison of \S\ref{sec:deployment} partially closes this
+--- same kernel class, decisions re-derived per evaluation --- but
+CRoaring remains unmeasured.
 (3)~Operands and trees are synthetic (deterministic generators);
 standard Roaring real-data corpora and production filter traces remain
 future work. (4)~Interior-node bounds are sound but loose, and static
@@ -871,22 +880,72 @@ mis-dispatch frequency against an oracle is open. The evaluation is
 single-threaded; the per-thread pool design has not been characterized
 under concurrency.
 
-\section{Deployment}
+\section{Deployment and the Incumbent Substrate}
 \label{sec:deployment}
 
-\fb{} is deployed as the filtering substrate of Exa, a commercial
-web-scale search engine, where every boolean filter predicate compiles
-to a \fb{} expression evaluated against frozen per-segment bitmaps
-served from memory maps. Plans are per-(expression, segment) --- the
-analysis runs against each segment's exact leaf metadata, which is what
-makes its guarantees possible, and its cost sits on the query path
-exactly as in every measurement of \S\ref{sec:eval}. The deployment
-exercises the design as intended --- immutable segments produced by an
-indexing pipeline, allocation-free steady-state evaluation --- and
-motivated the original design constraints, in particular the removal
-of allocator traffic from the tail. A quantitative production
-characterization (tail-latency distributions, filter-shape statistics,
-fleet-scale resource accounting) is beyond the scope of this paper.
+\fb{} is the successor to the filtering substrate of Exa, a commercial
+web-scale search engine, where every boolean filter predicate is
+evaluated against frozen per-segment bitmaps served from memory maps.
+Plans are per-(expression, segment) --- the analysis runs against each
+segment's exact leaf metadata, which is what makes its guarantees
+possible, and its cost sits on the query path exactly as in every
+measurement of \S\ref{sec:eval}.
+
+\textbf{Head-to-head against the incumbent.} The deployed substrate
+(``FROZ-v2''), from which \fb{} was extracted, is the sharpest
+available test of this paper's thesis: it shares the design lineage
+--- the same container algebra, SIMD kernel class, arena execution,
+in-place serialization, and a runtime hole-punching mode --- but
+re-derives its decisions during each evaluation instead of carrying
+them in a plan. We ran both engines on the identical workloads of
+\S\ref{sec:eval} (same generators and seeds; outputs verified equal on
+every op/regime, every named shape, and every 64th corpus tree), with
+the incumbent's production telemetry layer stubbed to no-ops --- which
+only flatters it, since production pays per-operation metric costs
+\fb{} does not have. Table~\ref{tab:incumbent} reports the result.
+
+\begin{table}[t]
+\caption{\fb{} vs.\ the deployed incumbent (FROZ-v2), identical
+workloads, medians; incumbent shown plain and with its runtime
+hole-punching enabled.}
+\label{tab:incumbent}
+\small
+\begin{tabular}{lrrr}
+\toprule
+shape & \fb & v2 & v2$^{\text{punch}}$ \\
+\midrule
+25k corpus (s) & \textbf{2.57} & 2.79 & 2.66 \\
+selective (\textmu s) & \textbf{8.3} & 261 & 34.4 \\
+filter (\textmu s) & \textbf{17.4} & 32.7 & 23.5 \\
+dnf (\textmu s) & \textbf{50.4} & 181 & 181 \\
+conj5 (\textmu s) & \textbf{33.8} & 41.8 & 43.4 \\
+cnf3 (\textmu s) & \textbf{71.8} & 78.2 & 80.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On the flat sweep \fb{} wins 33 of 36 cells: sparse difference by
+$5.5$--$12.4\times$ (the incumbent folds its $n$-ary difference
+pairwise), sparse intersection by $1.9$--$3.3\times$, dense
+intersection up to $3.0\times$, and unions mostly by
+$1.2$--$2.2\times$; the incumbent keeps binary sparse union
+($0.88\times$ --- its union kernel is markedly stronger than the Rust
+Roaring library's), 8-way run intersection ($0.84\times$), and ties
+16-way sparse union. On eight random shape-class trees \fb{} wins
+five, ties one, and loses two (worst $0.50\times$ on one 49-leaf
+shape, an unresolved offender). The aggregate corpus gain over this
+incumbent is deliberately reported as what it is --- $+8\%$ plain,
+$+3\%$ against its punched mode --- because that is the honest shape
+of the result: against an equally-tuned engine of the same lineage,
+static planning's value concentrates not in the aggregate but in the
+tails it removes (unpunched selective filters, $31\times$; union
+promotion on DNF shapes, $3.6\times$; every sparse-difference shape,
+$5$--$12\times$) and in the guarantees --- allocation-freeness, the
+memory bound, static liveness --- that per-evaluation re-analysis
+cannot emit. A fleet-scale production characterization (tail-latency
+distributions, filter-shape statistics) remains beyond this paper's
+scope; the incumbent comparison above was measured on the same
+hardware and protocol as every other number reported here.
 
 \section{Conclusion}
 
