@@ -57,17 +57,17 @@ Roaring implementations.
 
 Against both configurations of the standard Rust Roaring library, with
 all $n$-ary baseline calls routed through the library's documented
-\texttt{MultiOps} fast path, \fb{} wins 34 of a 2--16-way operation
-sweep's 36 cells: every sorted-array cell ($1.25$--$12.2\times$),
-every packed-bitmap cell but a binary-difference tie, and every
-run-container cell but 16-way intersection ($0.87\times$, the single
-loss). End-to-end it evaluates
+\texttt{MultiOps} fast path, \fb{} wins 32 of a 2--16-way operation
+sweep's 36 cells outright --- every sorted-array cell
+($1.2$--$12.2\times$), every intersection and union cell --- and ties
+the remaining four (small difference cells, $0.94$--$1.00\times$,
+inside measurement noise), with no losses. End-to-end it evaluates
 a 25{,}000-tree filter corpus $2.7\times$ and $2.2\times$ faster, with
 per-mechanism ablations --- including rejected designs --- isolating
 the contribution of each planning decision. Against the production
 substrate it succeeds at a commercial web-scale search engine --- an
 equally-tuned engine of the same lineage that re-derives its decisions
-during each evaluation --- \fb{} wins 33 of 36 operation cells and
+during each evaluation --- \fb{} wins 34 of 36 operation cells and
 $3$--$8\%$ end-to-end, with tail shapes improving up to $31\times$:
 the measured value of carrying decisions in the plan rather than
 re-deriving them.
@@ -641,7 +641,10 @@ tied to the plan's shapes.
 The instruction sequence carries \emph{guards} after each non-flattened
 $\wedge$-operand and each $\setminus$-minuend: an empty operand pops the
 partial state and branches past the fold, so sibling subtrees are never
-evaluated. Guards use relative offsets and therefore survive splicing
+evaluated. An intersection whose planned key sets are disjoint is
+statically empty and skips its fold before reading any input byte;
+dynamically, every accumulator form exits its key the moment it
+empties. Guards use relative offsets and therefore survive splicing
 into enclosing plans. Within operators, intersection fuses population
 count into the word-level AND and abandons a key on emptiness; per-key
 folds order operands most-selective-first; partner-major passes skip
@@ -701,32 +704,43 @@ clamp stress; every configuration reported here passes all suites.
 
 Table~\ref{tab:sweep} reports the full 2--16-way sweep over three
 container regimes; all 36 cells of all three systems come from one
-run of the protocol above. \fb{} wins 34 cells against both builds:
-every sorted-array cell ($1.25$--$12.2\times$ over default,
-$1.26$--$2.9\times$ over SIMD), every packed-bitmap cell
-($1.05$--$3.8\times$) except a binary-difference tie
-($0.97$--$0.98\times$), and every run-container cell
-($1.01$--$1.69\times$) except 16-way intersection ($0.87\times$), the
-sweep's single loss.
+run of the protocol above. \fb{} wins 32 cells outright against both
+builds: every sorted-array cell ($1.20$--$12.2\times$ over default,
+$1.22$--$3.0\times$ over SIMD), every intersection cell
+($1.04$--$5.8\times$), and every union cell ($1.02$--$3.0\times$).
+The remaining four cells --- difference at 2- and 4-way in the dense
+and run regimes --- sit at $0.94$--$1.00\times$, inside the
+measurement-noise band, and trade sides across repeated runs; the
+sweep contains no cell where either build beats \fb{} beyond noise.
 
 The run-container regime did not start this way, and its repair is a
-case study in what the analysis pass itself costs. Run cells carry
-$\sim$18-byte payloads, so an earlier version lost the binary cells
-outright ($0.68\times$ at binary run difference): decomposition showed
-the planning walk alone was 282\,ns of the 781\,ns total, the fold
-including arena setup was at parity with the baseline's entire
-operation, and in-place serialization measured at noise --- the cells
-isolated the price of the analysis pass, with no data volume to
-amortize it against. Three measured responses (ablation rows in
-Table~\ref{tab:abl}) recovered the regime: pooling the plan's
-buffers, a hybrid seed-driven plan walk with an inlined cursor fast
-path, and --- decisively --- capacity-analysis-free plans for tiny
+two-part case study. The first part priced the analysis pass: run
+cells carry $\sim$18-byte payloads, and an earlier version lost the
+binary cells outright ($0.68\times$ at binary run difference) because
+the planning walk alone was 282\,ns of the 781\,ns total while the
+fold was at parity with the baseline's entire operation --- the cells
+isolated the cost of analysis with no data volume to amortize it
+against. Three measured responses (ablation rows in
+Table~\ref{tab:abl}) recovered those cells: pooled plan buffers, a
+hybrid seed-driven plan walk with an inlined cursor fast path, and ---
+decisively --- capacity-analysis-free plans for tiny
 $\wedge$/$\setminus$ one-shots, which clamp every slot at $\B$ (sound:
 every fold state fits a bitmap slot, and the driving input's key set
-is a superset whose unclaimed slots serialize to nothing). The
-remaining loss is structural rather than analytical: 16-way run
-intersection folds $n{-}1$ sequential native-run passes where the
-baseline aggregates; a $k$-way run merge is concrete future work.
+is a superset whose unclaimed slots serialize to nothing). The second
+part corrected a wrong diagnosis. The last holdout, 16-way run
+intersection, is an \emph{annihilating} cell: the sweep's
+phase-shifted run windows sweep apart after roughly five operands, so
+the 16-way result is empty and the cell measures collapse handling,
+not merge throughput. The baseline's whole-bitmap accumulator makes
+every post-annihilation pass free --- an empty accumulator has no
+containers to visit --- while \fb's run fold, unlike its array and
+bitmap arms, lacked the empty-accumulator exit and ground through all
+$n{-}1$ passes. Restoring that exit, seeding the run fold from the
+minimum-cardinality container so annihilation arrives soonest, and
+skipping any fold whose planned key intersection is already empty
+flipped the cell ($0.87\times \to 1.04\times$) and the
+partially-annihilating 8-way cell (to $2.26\times$); a statically
+disjoint intersection now costs the plan walk alone.
 
 \begin{table*}[t]
 \caption{Full operation sweep, medians in \textmu s: \fb{} / Roaring
@@ -739,15 +753,15 @@ bitmaps (5000/key); runs = 16-key run containers.}
 \toprule
 op & regime & 2-way & 4-way & 8-way & 16-way \\
 \midrule
-$\wedge$ & sparse & 10.1 / 54.1 / 16.8 & 13.7 / 68.8 / 28.4 & 16.4 / 73.7 / 28.5 & 19.8 / 59.3 / 28.5 \\
-$\wedge$ & dense & 14.8 / 16.1 / 16.5 & 13.3 / 19.4 / 19.7 & 12.3 / 19.8 / 19.9 & 14.7 / 19.8 / 19.9 \\
-$\wedge$ & runs & 0.62 / 0.86 / 0.86 & 1.20 / 2.00 / 2.00 & 1.90 / 2.70 / 2.70 & 3.10 / 2.70 / 2.70 \\
-$\vee$ & sparse & 46.1 / 82.3 / 98.7 & 53.8 / 163.6 / 158.2 & 112.6 / 141.4 / 142.1 & 221.0 / 286.9 / 289.9 \\
-$\vee$ & dense & 4.90 / 5.20 / 5.20 & 9.60 / 11.4 / 11.5 & 20.0 / 23.8 / 23.9 & 41.6 / 48.6 / 48.7 \\
-$\vee$ & runs & 0.79 / 0.90 / 0.90 & 1.50 / 2.20 / 2.20 & 2.90 / 4.80 / 4.80 & 5.40 / 7.30 / 7.20 \\
-$\setminus$ & sparse & 11.3 / 52.5 / 18.0 & 31.5 / 337.0 / 54.3 & 72.9 / 890.3 / 136.1 & 190.2 / 1950 / 316.3 \\
-$\setminus$ & dense & 5.60 / 5.50 / 5.40 & 46.9 / 53.4 / 50.1 & 53.3 / 134.3 / 134.2 & 64.8 / 241.8 / 244.9 \\
-$\setminus$ & runs & 0.56 / 0.57 / 0.59 & 0.99 / 1.00 / 1.00 & 1.80 / 2.10 / 2.10 & 3.20 / 3.70 / 3.80 \\
+$\wedge$ & sparse & 10.4 / 59.9 / 17.3 & 14.1 / 69.5 / 28.6 & 16.7 / 58.8 / 28.6 & 20.3 / 64.6 / 28.5 \\
+$\wedge$ & dense & 15.6 / 16.6 / 16.7 & 13.7 / 20.1 / 19.9 & 12.6 / 20.4 / 20.1 & 14.7 / 20.4 / 20.3 \\
+$\wedge$ & runs & 0.66 / 0.87 / 0.86 & 1.20 / 1.90 / 2.00 & 1.20 / 2.70 / 2.60 & 2.60 / 2.70 / 2.70 \\
+$\vee$ & sparse & 46.3 / 85.7 / 83.1 & 54.6 / 164.9 / 163.0 & 116.5 / 139.3 / 142.7 & 229.3 / 282.7 / 290.4 \\
+$\vee$ & dense & 5.00 / 5.10 / 5.20 & 9.70 / 11.4 / 11.5 & 20.3 / 23.8 / 24.1 & 42.0 / 48.7 / 49.3 \\
+$\vee$ & runs & 0.81 / 0.93 / 0.91 & 1.60 / 2.20 / 2.20 & 3.10 / 4.80 / 4.80 & 5.70 / 7.40 / 7.40 \\
+$\setminus$ & sparse & 11.6 / 52.7 / 17.5 & 31.7 / 336.9 / 50.0 & 74.1 / 905.7 / 124.9 & 186.3 / 2020 / 318.7 \\
+$\setminus$ & dense & 5.70 / 5.40 / 5.50 & 51.2 / 50.1 / 51.0 & 54.4 / 131.7 / 137.7 & 66.4 / 241.0 / 248.3 \\
+$\setminus$ & runs & 0.59 / 0.55 / 0.58 & 1.00 / 1.00 / 1.00 & 1.90 / 2.10 / 2.10 & 3.40 / 3.70 / 3.80 \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -759,8 +773,8 @@ End-to-end evaluation uses 25{,}000 deterministic random filter trees
 per-tree shape profiles spanning deep conjunction chains, flat 100-way
 disjunctions, and difference-heavy composites; 100 trees pinned to both
 extremes), each built, planned, and materialized per iteration.
-\fb: \textbf{2.55\,s} (9.8K trees/s); default baseline 6.85\,s
-($2.69\times$); SIMD baseline 5.64\,s ($2.21\times$).
+\fb: \textbf{2.73\,s} (9.2K trees/s); default baseline 7.14\,s
+($2.61\times$); SIMD baseline 5.78\,s ($2.12\times$).
 Table~\ref{tab:trees} reports named shapes bracketing production
 patterns.
 
@@ -775,13 +789,13 @@ run); \fb's pruning multiple exceeds $100\times$ against either.}
 \toprule
 shape & \fb & R & R$^{\text{simd}}$ \\
 \midrule
-conj5 (nested $\wedge$, flattens 5-way) & \textbf{34.4} & 271 & 69.3 \\
-filter (base $\wedge$ OR-group $\wedge$ $\neg$lang) & \textbf{17.5} & 41.4 & 40.8 \\
-dnf ($\vee$ of $\wedge$-groups) & \textbf{50.5} & 632 & 109 \\
-cnf3 ($\wedge$ of $\vee$-groups) & \textbf{70.4} & 107 & 92.6 \\
-selective (statically pruned) & \textbf{7.1} & 1460 & 1500 \\
-contradiction (guarded) & \textbf{0.143} & 738 & 814 \\
-25k corpus (seconds) & \textbf{2.55} & 6.85 & 5.64 \\
+conj5 (nested $\wedge$, flattens 5-way) & \textbf{34.9} & 265 & 70.9 \\
+filter (base $\wedge$ OR-group $\wedge$ $\neg$lang) & \textbf{17.8} & 40.6 & 41.7 \\
+dnf ($\vee$ of $\wedge$-groups) & \textbf{52.5} & 614 & 112 \\
+cnf3 ($\wedge$ of $\vee$-groups) & \textbf{74.2} & 105 & 94.0 \\
+selective (statically pruned) & \textbf{7.6} & 1450 & 1520 \\
+contradiction (guarded) & \textbf{0.147} & 738 & 747 \\
+25k corpus (seconds) & \textbf{2.73} & 7.14 & 5.78 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -835,6 +849,7 @@ pooled plan buffers (slots + cursors) & $\setminus$ runs/2: $781 \to 692$\,ns \\
 inlined \texttt{advance\_to} + hybrid plan walk & $\wedge$ sp/16: $20.6 \to 19.9\us$ \\
 trivial $\B$-plans, tiny $\wedge/\setminus$ one-shots & $\setminus$ runs/2: $692 \to 607$\,ns \\
 monomorphic run fold + fused seed scan & $\wedge$ runs/16: $3.5 \to 3.3\us$ \\
+run-fold empty exit + min-card seed & $\wedge$ runs/16: $3.1 \to 2.6\us$ \\
 \midrule
 eager bitmap intermediates ($s > 256$) & cnf3 $89 \to 115\us$ \\
 branchless scalar $\vee$ merge & $72 \to 91\us$ \\
@@ -914,23 +929,24 @@ hole-punching enabled.}
 \toprule
 shape & \fb & v2 & v2$^{\text{punch}}$ \\
 \midrule
-25k corpus (s) & \textbf{2.57} & 2.79 & 2.66 \\
-selective (\textmu s) & \textbf{8.3} & 261 & 34.4 \\
-filter (\textmu s) & \textbf{17.4} & 32.7 & 23.5 \\
-dnf (\textmu s) & \textbf{50.4} & 181 & 181 \\
-conj5 (\textmu s) & \textbf{33.8} & 41.8 & 43.4 \\
-cnf3 (\textmu s) & \textbf{71.8} & 78.2 & 80.4 \\
+25k corpus (s) & \textbf{2.62} & 2.84 & 2.71 \\
+selective (\textmu s) & \textbf{8.5} & 265 & 35.4 \\
+filter (\textmu s) & \textbf{17.6} & 33.2 & 23.7 \\
+dnf (\textmu s) & \textbf{52.0} & 182 & 184 \\
+conj5 (\textmu s) & \textbf{34.2} & 42.3 & 44.0 \\
+cnf3 (\textmu s) & \textbf{73.0} & 79.0 & 81.5 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-On the flat sweep \fb{} wins 33 of 36 cells: sparse difference by
-$5.5$--$12.4\times$ (the incumbent folds its $n$-ary difference
+On the flat sweep \fb{} wins 34 of 36 cells: sparse difference by
+$5.4$--$12.3\times$ (the incumbent folds its $n$-ary difference
 pairwise), sparse intersection by $1.9$--$3.3\times$, dense
-intersection up to $3.0\times$, and unions mostly by
-$1.2$--$2.2\times$; the incumbent keeps binary sparse union
-($0.88\times$ --- its union kernel is markedly stronger than the Rust
-Roaring library's), 8-way run intersection ($0.84\times$), and ties
+intersection up to $3.0\times$, run cells by $1.3$--$1.6\times$ (the
+incumbent's run fold also lacks the empty-accumulator exit of
+\S\ref{sec:eval}), and unions mostly by $1.2$--$2.2\times$; the
+incumbent keeps binary sparse union ($0.85\times$ --- its union
+kernel is markedly stronger than the Rust Roaring library's) and ties
 16-way sparse union. On eight random shape-class trees \fb{} wins
 five, ties one, and loses two (worst $0.50\times$ on one 49-leaf
 shape, an unresolved offender). The aggregate corpus gain over this
@@ -956,12 +972,11 @@ guarantees dynamic schemes cannot offer: allocation-free execution under
 a closed-form memory bound, sound static pruning at container
 granularity across arbitrary expression trees, and fold orders selected
 from proven footprints. On kernels measured at parity with the
-baseline's, these plan-time guarantees account for the bulk of wins in
-34 of 36 sweep cells --- sorted-array operations by
-$1.25$--$12.2\times$ --- and $2.2$--$2.7\times$ end-to-end against the
-standard Rust Roaring library's documented fast paths, with the single
-remaining run-container loss (\S\ref{sec:eval}) bounding where \fb's
-static policies currently pay.
+baseline's, these plan-time guarantees account for the bulk of
+outright wins in 32 of 36 sweep cells --- sorted-array operations by
+$1.2$--$12.2\times$ --- with the remaining four inside measurement
+noise and none lost, and $2.1$--$2.6\times$ end-to-end against the
+standard Rust Roaring library's documented fast paths.
 The system, its differential
 and stress suites, the 25k-tree corpus, and the audit tooling are open
 source.\footnote{\url{https://github.com/WilliXL/frostbit}}
