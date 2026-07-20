@@ -57,10 +57,10 @@ Roaring implementations.
 
 Against both configurations of the standard Rust Roaring library, with
 all $n$-ary baseline calls routed through the library's documented
-\texttt{MultiOps} fast path, \fb{} wins 32 of a 2--16-way operation
+\texttt{MultiOps} fast path, \fb{} wins 34 of a 2--16-way operation
 sweep's 36 cells outright --- every sorted-array cell
-($1.2$--$12.2\times$), every intersection and union cell --- and ties
-the remaining four (small difference cells, $0.94$--$1.00\times$,
+($1.2$--$12.9\times$), every intersection and union cell --- and ties
+the remaining two (binary difference cells, $0.96$--$1.02\times$,
 inside measurement noise), with no losses. End-to-end it evaluates
 a 25{,}000-tree filter corpus $2.7\times$ and $2.2\times$ faster, with
 per-mechanism ablations --- including rejected designs --- isolating
@@ -550,6 +550,19 @@ $5\times$ too long. Fan-in bounds come from the weighted shapes of
 union, and run-splitting difference on typed interval slices) inside
 $\B$-clamped slots, converting to bitmaps only on proven overflow.
 
+\textbf{Within-key order and empty collapse.} Intersection's per-key
+seed scan (which already reads every operand's cardinality) also
+gates two micro-policies: when fan-in $\ge 5$ and the cardinality
+spread exceeds $2\times$, partners fold in ascending cardinality, so
+the accumulator shrinks before the expensive folds arrive (each fold
+costs roughly $|\mathrm{acc}| \log |p|$); and the array-intersection
+kernel rejects disjoint value ranges in $O(1)$ at entry --- the
+shuffle-merge tier otherwise has no early exit, so banded or
+partitioned identifier spaces would stream complete merges to produce
+nothing. A per-key $O(n)$ range pre-test was measured and rejected
+($+4$--$17\%$ on non-annihilating keys); the kernel-entry form costs
+nothing measurable (Table~\ref{tab:abl}).
+
 \section{Fold-Order Selection}
 \label{sec:foldorder}
 
@@ -704,14 +717,14 @@ clamp stress; every configuration reported here passes all suites.
 
 Table~\ref{tab:sweep} reports the full 2--16-way sweep over three
 container regimes; all 36 cells of all three systems come from one
-run of the protocol above. \fb{} wins 32 cells outright against both
-builds: every sorted-array cell ($1.20$--$12.2\times$ over default,
-$1.22$--$3.0\times$ over SIMD), every intersection cell
-($1.04$--$5.8\times$), and every union cell ($1.02$--$3.0\times$).
-The remaining four cells --- difference at 2- and 4-way in the dense
-and run regimes --- sit at $0.94$--$1.00\times$, inside the
-measurement-noise band, and trade sides across repeated runs; the
-sweep contains no cell where either build beats \fb{} beyond noise.
+run of the protocol above. \fb{} wins 34 cells outright against both
+builds: every sorted-array cell ($1.20$--$12.9\times$ over default,
+$1.20$--$2.9\times$ over SIMD), every intersection cell
+($1.04$--$5.4\times$), and every union cell ($1.04$--$2.9\times$).
+The remaining two cells --- binary difference in the dense and run
+regimes --- sit at $0.96$--$1.02\times$, inside the measurement-noise
+band, and trade sides across repeated runs; the sweep contains no
+cell where either build beats \fb{} beyond noise.
 
 The run-container regime did not start this way, and its repair is a
 two-part case study. The first part priced the analysis pass: run
@@ -753,15 +766,15 @@ bitmaps (5000/key); runs = 16-key run containers.}
 \toprule
 op & regime & 2-way & 4-way & 8-way & 16-way \\
 \midrule
-$\wedge$ & sparse & 10.4 / 59.9 / 17.3 & 14.1 / 69.5 / 28.6 & 16.7 / 58.8 / 28.6 & 20.3 / 64.6 / 28.5 \\
-$\wedge$ & dense & 15.6 / 16.6 / 16.7 & 13.7 / 20.1 / 19.9 & 12.6 / 20.4 / 20.1 & 14.7 / 20.4 / 20.3 \\
-$\wedge$ & runs & 0.66 / 0.87 / 0.86 & 1.20 / 1.90 / 2.00 & 1.20 / 2.70 / 2.60 & 2.60 / 2.70 / 2.70 \\
-$\vee$ & sparse & 46.3 / 85.7 / 83.1 & 54.6 / 164.9 / 163.0 & 116.5 / 139.3 / 142.7 & 229.3 / 282.7 / 290.4 \\
-$\vee$ & dense & 5.00 / 5.10 / 5.20 & 9.70 / 11.4 / 11.5 & 20.3 / 23.8 / 24.1 & 42.0 / 48.7 / 49.3 \\
-$\vee$ & runs & 0.81 / 0.93 / 0.91 & 1.60 / 2.20 / 2.20 & 3.10 / 4.80 / 4.80 & 5.70 / 7.40 / 7.40 \\
-$\setminus$ & sparse & 11.6 / 52.7 / 17.5 & 31.7 / 336.9 / 50.0 & 74.1 / 905.7 / 124.9 & 186.3 / 2020 / 318.7 \\
-$\setminus$ & dense & 5.70 / 5.40 / 5.50 & 51.2 / 50.1 / 51.0 & 54.4 / 131.7 / 137.7 & 66.4 / 241.0 / 248.3 \\
-$\setminus$ & runs & 0.59 / 0.55 / 0.58 & 1.00 / 1.00 / 1.00 & 1.90 / 2.10 / 2.10 & 3.40 / 3.70 / 3.80 \\
+$\wedge$ & sparse & 10.4 / 56.2 / 16.9 & 14.2 / 62.7 / 28.5 & 16.9 / 65.1 / 28.3 & 20.6 / 61.7 / 28.4 \\
+$\wedge$ & dense & 15.1 / 17.1 / 16.6 & 13.7 / 20.1 / 20.0 & 12.5 / 20.4 / 20.6 & 15.0 / 20.3 / 20.4 \\
+$\wedge$ & runs & 0.66 / 0.84 / 0.86 & 1.20 / 1.90 / 2.00 & 1.20 / 2.70 / 2.70 & 2.60 / 2.70 / 2.70 \\
+$\vee$ & sparse & 46.2 / 84.9 / 83.0 & 55.0 / 160.2 / 157.2 & 116.7 / 141.8 / 140.5 & 220.8 / 289.0 / 293.6 \\
+$\vee$ & dense & 5.10 / 5.30 / 5.40 & 9.80 / 11.5 / 11.8 & 20.6 / 24.1 / 24.4 & 42.2 / 49.1 / 49.1 \\
+$\vee$ & runs & 0.84 / 0.92 / 0.92 & 1.60 / 2.20 / 2.20 & 3.10 / 4.70 / 4.90 & 5.70 / 7.30 / 7.50 \\
+$\setminus$ & sparse & 11.5 / 53.6 / 17.6 & 31.8 / 354.1 / 50.0 & 73.5 / 948.4 / 125.5 & 178.2 / 2070 / 320.0 \\
+$\setminus$ & dense & 5.70 / 5.80 / 5.50 & 48.8 / 51.7 / 52.2 & 54.9 / 134.3 / 137.9 & 66.5 / 244.7 / 251.0 \\
+$\setminus$ & runs & 0.59 / 0.60 / 0.57 & 1.00 / 1.00 / 1.00 & 1.80 / 2.10 / 2.10 & 3.20 / 3.80 / 3.80 \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -773,8 +786,8 @@ End-to-end evaluation uses 25{,}000 deterministic random filter trees
 per-tree shape profiles spanning deep conjunction chains, flat 100-way
 disjunctions, and difference-heavy composites; 100 trees pinned to both
 extremes), each built, planned, and materialized per iteration.
-\fb: \textbf{2.73\,s} (9.2K trees/s); default baseline 7.14\,s
-($2.61\times$); SIMD baseline 5.78\,s ($2.12\times$).
+\fb: \textbf{2.62\,s} (9.5K trees/s); default baseline 6.83\,s
+($2.61\times$); SIMD baseline 5.75\,s ($2.19\times$).
 Table~\ref{tab:trees} reports named shapes bracketing production
 patterns.
 
@@ -789,13 +802,13 @@ run); \fb's pruning multiple exceeds $100\times$ against either.}
 \toprule
 shape & \fb & R & R$^{\text{simd}}$ \\
 \midrule
-conj5 (nested $\wedge$, flattens 5-way) & \textbf{34.9} & 265 & 70.9 \\
-filter (base $\wedge$ OR-group $\wedge$ $\neg$lang) & \textbf{17.8} & 40.6 & 41.7 \\
-dnf ($\vee$ of $\wedge$-groups) & \textbf{52.5} & 614 & 112 \\
-cnf3 ($\wedge$ of $\vee$-groups) & \textbf{74.2} & 105 & 94.0 \\
-selective (statically pruned) & \textbf{7.6} & 1450 & 1520 \\
-contradiction (guarded) & \textbf{0.147} & 738 & 747 \\
-25k corpus (seconds) & \textbf{2.73} & 7.14 & 5.78 \\
+conj5 (nested $\wedge$, flattens 5-way) & \textbf{18.7} & 302 & 70.6 \\
+filter (base $\wedge$ OR-group $\wedge$ $\neg$lang) & \textbf{17.7} & 41.9 & 41.2 \\
+dnf ($\vee$ of $\wedge$-groups) & \textbf{52.2} & 617 & 114 \\
+cnf3 ($\wedge$ of $\vee$-groups) & \textbf{72.8} & 111 & 93.9 \\
+selective (statically pruned) & \textbf{7.4} & 1500 & 1430 \\
+contradiction (guarded) & \textbf{0.145} & 753 & 719 \\
+25k corpus (seconds) & \textbf{2.62} & 6.83 & 5.75 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -850,6 +863,8 @@ inlined \texttt{advance\_to} + hybrid plan walk & $\wedge$ sp/16: $20.6 \to 19.9
 trivial $\B$-plans, tiny $\wedge/\setminus$ one-shots & $\setminus$ runs/2: $692 \to 607$\,ns \\
 monomorphic run fold + fused seed scan & $\wedge$ runs/16: $3.5 \to 3.3\us$ \\
 run-fold empty exit + min-card seed & $\wedge$ runs/16: $3.1 \to 2.6\us$ \\
+spread-gated ascending partner order & conj5: $34.9 \to 18.7\us$ \\
+O(1) disjoint reject, array-$\wedge$ entry & banded 2-way $\wedge$: $2.7 \to 0.6\us$ \\
 \midrule
 eager bitmap intermediates ($s > 256$) & cnf3 $89 \to 115\us$ \\
 branchless scalar $\vee$ merge & $72 \to 91\us$ \\
@@ -973,9 +988,9 @@ a closed-form memory bound, sound static pruning at container
 granularity across arbitrary expression trees, and fold orders selected
 from proven footprints. On kernels measured at parity with the
 baseline's, these plan-time guarantees account for the bulk of
-outright wins in 32 of 36 sweep cells --- sorted-array operations by
-$1.2$--$12.2\times$ --- with the remaining four inside measurement
-noise and none lost, and $2.1$--$2.6\times$ end-to-end against the
+outright wins in 34 of 36 sweep cells --- sorted-array operations by
+$1.2$--$12.9\times$ --- with the remaining two inside measurement
+noise and none lost, and $2.2$--$2.6\times$ end-to-end against the
 standard Rust Roaring library's documented fast paths.
 The system, its differential
 and stress suites, the 25k-tree corpus, and the audit tooling are open
