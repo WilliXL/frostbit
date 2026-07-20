@@ -54,7 +54,10 @@ pub fn intersect_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
 /// Fold `inputs` (AND) into a pre-sized `arena`. The arena's slots come from the
 /// manifest, so this does no sizing analysis — it only drives keys and folds.
 pub fn intersect_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
-    if inputs.is_empty() {
+    // Statically disjoint key sets: the plan proved the result empty before
+    // any input byte is read — skip the whole walk. (Trivial plans never hit
+    // this: their slots are the driving input's keys.)
+    if inputs.is_empty() || arena.num_slots() == 0 {
         return;
     }
     let seed = (0..inputs.len()).min_by_key(|&i| inputs.container_count(i)).unwrap();
@@ -87,7 +90,7 @@ pub fn intersect_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
     }
 }
 
-fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'_>]) {
+fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &mut [ContainerRef<'_>]) {
     // Seed from the smallest-card container; its representation fixes the
     // accumulator (array or bitmap) for the whole fold, so it never outgrows
     // the slot. AND only ever shrinks it. One scan gathers the seed and the
@@ -135,7 +138,9 @@ fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &[ContainerRef<'
         let card = acc.finish(arena, i);
         arena.record(key, CT_ARRAY, card, i, card as usize * 2);
     } else if runs_ok && truns <= MAX_RUNS {
-        // Dense run containers stay runs (O(runs), not O(bitmap)).
+        // Dense run containers stay runs (O(runs), not O(bitmap)). Seed from
+        // the min-card container so an annihilating fold empties soonest.
+        refs.swap(0, seed);
         let (card, bytes) = run_fold(arena, i, &refs[0], &refs[1..], run::intersect);
         arena.record(key, CT_RUN, card, i, bytes);
     } else {
@@ -822,6 +827,9 @@ fn run_fold_diff(
         (nr, card) = step(as_runs(lhs), p0, a);
     }
     for p in rest {
+        if card == 0 {
+            break;
+        }
         let (src, dst): (&[u8], &mut [u8]) = if in_b { (b, a) } else { (a, b) };
         let src: &[Run] = &bytemuck::cast_slice(src)[..nr];
         (nr, card) = step(src, p, dst);
@@ -885,6 +893,9 @@ fn run_fold(
         }
     }
     for p in rest {
+        if card == 0 {
+            break;
+        }
         let (src, dst): (&[u8], &mut [u8]) = if in_b { (b, a) } else { (a, b) };
         let src: &[Run] = &bytemuck::cast_slice(src)[..nr];
         (nr, card) = op(src, as_runs(p), bytemuck::cast_slice_mut(dst));
