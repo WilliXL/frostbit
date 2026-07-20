@@ -93,19 +93,27 @@ pub fn intersect_fold<I: Inputs + ?Sized>(arena: &mut OpArena, inputs: &I) {
 fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &mut [ContainerRef<'_>]) {
     // Seed from the smallest-card container; its representation fixes the
     // accumulator (array or bitmap) for the whole fold, so it never outgrows
-    // the slot. AND only ever shrinks it. One scan gathers the seed and the
-    // native-run precondition together.
-    let (mut seed, mut min_card) = (0usize, u32::MAX);
+    // the slot. AND only ever shrinks it. One scan gathers the seed, the
+    // native-run precondition, and the card spread together.
+    let (mut seed, mut min_card, mut max_card) = (0usize, u32::MAX, 0u32);
     let (mut runs_ok, mut truns) = (true, 0usize);
     for (j, r) in refs.iter().enumerate() {
         if r.card < min_card {
             (seed, min_card) = (j, r.card);
         }
+        max_card = max_card.max(r.card);
         if runs_ok && r.typ == CT_RUN {
             truns += r.num_runs();
         } else {
             runs_ok = false;
         }
+    }
+    // Wide, skewed folds: ascending-card partner order shrinks the accumulator
+    // before the expensive partners arrive (each fold costs ~|acc|·log|p|).
+    // Gated so homogeneous folds never pay the sort.
+    if refs.len() >= 5 && max_card >= min_card.saturating_mul(2) {
+        refs.sort_unstable_by_key(|r| r.card);
+        seed = 0;
     }
 
     if refs[seed].card as usize <= ARRAY_MAX_SIZE {

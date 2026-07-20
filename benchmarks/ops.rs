@@ -133,6 +133,45 @@ fn decomp(c: &mut Criterion) {
     g.bench_function("and16/full", |b| b.iter(|| black_box(intersect_fast(&rv16))));
     g.bench_function(format!("and16/{RB}"), |b| b.iter(|| black_box(rb_and(&runs.rbs[..16]))));
     g.finish();
+
+    // Seed/order study shapes. skew: same 16 keys, cards alternating small/large
+    // (per-key partner order matters); disjoint: same keys, non-overlapping
+    // value bands (n-way AND is empty — range pre-test target).
+    let mut st = 0x5EED_0DE2_u64;
+    let skew: Vec<Vec<u32>> = (0..16)
+        .map(|i| {
+            let card = if i % 2 == 0 { 400 } else { 2500 };
+            arrays(16, card, &mut st)
+        })
+        .collect();
+    let skew = Set::new(&skew);
+    let band = |lo: u32, hi: u32, per: u32, st: &mut u64| -> Vec<u32> {
+        let mut v = Vec::new();
+        for k in 0..16u16 {
+            for _ in 0..per {
+                v.push(((k as u32) << 16) | (lo + splitmix64(st) as u32 % (hi - lo)));
+            }
+        }
+        sorted(v)
+    };
+    let disj: Vec<Vec<u32>> = (0..8)
+        .map(|i| band(i * 8192, (i + 1) * 8192, 800, &mut st))
+        .collect();
+    let disj = Set::new(&disj);
+    let mut g = c.benchmark_group("decomp_seed");
+    for n in [8usize, 16] {
+        let fv = skew.views(n);
+        let rv = &skew.rbs[..n];
+        g.bench_function(format!("skew/and{n}"), |b| b.iter(|| black_box(intersect_fast(&fv))));
+        g.bench_function(format!("skew/and{n}/{RB}"), |b| b.iter(|| black_box(rb_and(rv))));
+    }
+    for n in [2usize, 8] {
+        let fv = disj.views(n);
+        let rv = &disj.rbs[..n];
+        g.bench_function(format!("disjoint/and{n}"), |b| b.iter(|| black_box(intersect_fast(&fv))));
+        g.bench_function(format!("disjoint/and{n}/{RB}"), |b| b.iter(|| black_box(rb_and(rv))));
+    }
+    g.finish();
 }
 #[cfg(not(feature = "internals"))]
 fn decomp(_c: &mut Criterion) {}

@@ -12,6 +12,12 @@ pub(super) const MERGE_MAX_RATIO: usize = 4;
 /// `a ∩ b` for sorted, unique slices. Returns the result length.
 #[inline]
 pub fn array_intersect(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
+    // Disjoint ranges reject in O(1) before any tier — banded/partitioned data
+    // annihilates here instead of streaming a full merge (the shuffle-merge has
+    // no other early exit). Two compares on lines every tier touches anyway.
+    if a[a.len() - 1] < b[0] || b[b.len() - 1] < a[0] {
+        return 0;
+    }
     let (lo, hi) = if a.len() <= b.len() { (a.len(), b.len()) } else { (b.len(), a.len()) };
     // Heavy skew → galloping binary search (scalar, all targets), but only when
     // its `rare·log2(freq)` work clears the broadcast-scan's `freq/W` linear
