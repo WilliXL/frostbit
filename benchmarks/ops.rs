@@ -171,6 +171,17 @@ fn decomp(c: &mut Criterion) {
         g.bench_function(format!("disjoint/and{n}"), |b| b.iter(|| black_box(intersect_fast(&fv))));
         g.bench_function(format!("disjoint/and{n}/{RB}"), |b| b.iter(|| black_box(rb_and(rv))));
     }
+    // Non-degenerate wide run intersection: phase step 64 keeps all 16 windows
+    // overlapping (the sweep's runs/16 cell annihilates — this one measures
+    // merge throughput, not collapse).
+    let mut ovl = Set::new(&(0..16).map(|i| run_ranges(16, 4, 6000, i * 64)).collect::<Vec<_>>());
+    ovl.optimize_roaring();
+    for n in [8usize, 16] {
+        let fv = ovl.views(n);
+        let rv = &ovl.rbs[..n];
+        g.bench_function(format!("runs_ovl/and{n}"), |b| b.iter(|| black_box(intersect_fast(&fv))));
+        g.bench_function(format!("runs_ovl/and{n}/{RB}"), |b| b.iter(|| black_box(rb_and(rv))));
+    }
     g.finish();
 }
 #[cfg(not(feature = "internals"))]
