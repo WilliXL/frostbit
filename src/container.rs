@@ -94,11 +94,19 @@ impl<'a> Data<'a> {
                 }
             }
             Data::Bitmap(b) => {
-                for (w, &word) in b.iter().enumerate() {
-                    let mut bits = word;
-                    while bits != 0 {
-                        f((w * 64) as u16 + bits.trailing_zeros() as u16);
-                        bits &= bits - 1;
+                // 8-word groups whose OR is zero skip in one check — sparse
+                // bitmaps are mostly empty words, and the flat 1024-word walk
+                // was the fixed floor of every low-card extraction.
+                for (g, group) in b.chunks_exact(8).enumerate() {
+                    if group.iter().fold(0u64, |acc, &w| acc | w) == 0 {
+                        continue;
+                    }
+                    for (w, &word) in group.iter().enumerate() {
+                        let mut bits = word;
+                        while bits != 0 {
+                            f(((g * 8 + w) * 64) as u16 + bits.trailing_zeros() as u16);
+                            bits &= bits - 1;
+                        }
                     }
                 }
             }

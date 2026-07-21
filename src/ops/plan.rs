@@ -112,15 +112,28 @@ impl Plan {
 pub(crate) const UNION_DENSE_CARD: u32 = ARRAY_MAX_SIZE as u32;
 
 /// Fan-in-aware union promotion: with `n` containers at a key, the array path
-/// streams ~`sum·(n+1)/2` elements (each merge re-streams the accumulator),
-/// while a bitmap accumulator costs ~clear + scatter(sum) + popcount. Break-
-/// even (measured: ~0.85ns/streamed element, ~450ns fixed + ~1.2ns/scatter):
-/// never at n ≤ 3, sum ≳ 1000 at n = 4, falling as fan-in grows. The monorepo
-/// promotes at a blunt sum > 256 regardless of fan-in, which trades away
-/// low-fan-in shapes (cnf3-style AND-of-OR-groups) — fan-in awareness keeps
-/// those as arrays.
+/// streams ~`sum·f(n)` elements, `f(n) = (n+1)/2 − 1/n` (each merge re-streams
+/// the accumulator), while a bitmap accumulator costs clear + scatter(sum) +
+/// popcount. Break-even from measured kernel constants (merge ~0.85 ns/el,
+/// clear+popcount ~149 ns, scatter ~0.43 ns/el; `benchmarks/ops.rs::membw`)
+/// with a 1.35x margin on the fixed cost:
+///   s · (0.85·f(n) − 0.43) > 200  ⟺  s · (85n(n+1) − 86n − 170) > 40000·n
+/// i.e. s ≳ 476 at n = 2, 203 at n = 3, 135 at n = 4, falling with fan-in.
+/// (An earlier rule never promoted at n ≤ 3; it was fitted to pre-audit
+/// kernels whose fixed cost measured 3x higher — see the ablation ledger.)
 #[inline]
 pub(crate) fn union_promotes(n: usize, sum_card: u32) -> bool {
+    let n = n as u64;
+    let coef = 85 * n * (n + 1) - 86 * n - 170;
+    sum_card as u64 * coef > 40_000 * n
+}
+
+/// Tree-interior promotion: conservative, because a bitmap intermediate is
+/// consumed by a parent fold — measured on the corpus, aggressive promotion
+/// poisons downstream ANDs (cnf3 +62%, corpus +16%) even though it wins the
+/// flat op. Never at n ≤ 3; s(n−3) > 1000 above.
+#[inline]
+pub(crate) fn union_promotes_interior(n: usize, sum_card: u32) -> bool {
     n >= 4 && sum_card as usize * (n - 3) > 1000
 }
 

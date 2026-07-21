@@ -9,7 +9,7 @@
 
 use crate::format::*;
 use crate::ops::cursor::ContainerCursor;
-use crate::ops::plan::{union_promotes, wants_partner_major, Op, Plan, SlotPlan, UNION_DENSE_CARD};
+use crate::ops::plan::{union_promotes_interior, wants_partner_major, Op, Plan, SlotPlan, UNION_DENSE_CARD};
 use crate::FrozenBitmapView;
 
 /// One output container's analysis: arena slot ceiling + parent-facing bound.
@@ -149,7 +149,7 @@ pub fn union_shape(inputs: &[Shape], weights: &[usize]) -> Shape {
             }
         }
         let needs_bitmap =
-            any_bitmap || sum > UNION_DENSE_CARD || runs > MAX_RUNS || union_promotes(n, sum);
+            any_bitmap || sum > UNION_DENSE_CARD || runs > MAX_RUNS || union_promotes_interior(n, sum);
         let (cap, typ, oruns) = if needs_bitmap && all_run && n > 0 && runs <= MAX_RUNS {
             (BITMAP_BYTES as u32, CT_RUN, runs as u16)
         } else if needs_bitmap {
