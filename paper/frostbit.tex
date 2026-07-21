@@ -64,13 +64,14 @@ cell --- and ties the remaining two (small run-difference cells,
 within $\pm 6\%$), with no losses. End-to-end it evaluates
 a 25{,}000-tree filter corpus $2.8\times$ and $2.3\times$ faster, with
 per-mechanism ablations --- including rejected designs --- isolating
-the contribution of each planning decision. Against the production
-substrate it succeeds at a commercial web-scale search engine --- an
-equally-tuned engine of the same lineage that re-derives its decisions
-during each evaluation --- \fb{} wins all 36 operation cells and
-$10$--$16\%$ end-to-end, with tail shapes improving up to $31\times$:
-the measured value of carrying decisions in the plan rather than
-re-deriving them.
+the contribution of each planning decision. \fb{} descends from the
+filtering substrate deployed in production at Exa, a commercial
+web-scale search engine --- an equally-tuned engine of the same
+lineage that re-derives its decisions during each evaluation --- and
+on identical workloads improves on it across all 36 operation cells,
+every named filter shape, and $10$--$16\%$ end-to-end, with tail
+shapes up to $31\times$ and two of eight random tree shapes remaining
+the incumbent's.
 \end{abstract}
 
 \maketitle
@@ -128,7 +129,7 @@ guarantees no estimate-driven or adaptive optimizer provides:
   in place inside the working arena (\S\ref{sec:inplace}). Engines such
   as Trill~\cite{trill2015} and Photon~\cite{photon2022} pool and bound
   allocations operationally; CRoaring pre-sizes individual operations by
-  cardinality analysis~\cite{chambi2016}. \fb{} differs in deriving the
+  cardinality analysis~\cite{lemire2018}. \fb{} differs in deriving the
   bound for the \emph{whole expression} from the plan, and in the
   stronger consequence that the steady-state allocation count is exactly
   zero, a property we verify empirically.
@@ -191,7 +192,8 @@ cardinality thresholds, and footprint-gated fold-order selection,
 including the control experiments that scoped where each applies
 (\S\ref{sec:dispatch},~\S\ref{sec:foldorder}).
 \textbf{C4.} An evaluation against both configurations of the Rust
-Roaring library and against the production substrate \fb{} succeeds,
+Roaring library and against the deployed production substrate \fb{}
+descends from,
 with complete per-mechanism ablations including negative results, a
 25{,}000-tree corpus, and a per-tree audit methodology; \fb{} is
 released as open source
@@ -530,7 +532,8 @@ with $f(n) = \tfrac{n+1}{2}-\tfrac1n$; when the result re-materializes
 as an array ($s \le A_{\max}$), the bitmap path adds $c_x s$. Two
 policies dispatch on context, both measured. \emph{One-shot} unions,
 whose bitmap output is terminal, promote on the measured crossover with
-a $1.35\times$ margin on the fixed cost --- integer-exactly,
+a ${\approx}1.35\times$ margin on the fixed cost, rounded to the
+integer rule
 $s\,(85n(n{+}1) - 86n - 170) > 40000\,n$, i.e.\ $s \gtrsim 476, 203,
 135$ at $n = 2, 3, 4$ --- which took the binary sparse-union cell from
 $46$ to $31\us$. \emph{Tree-interior} unions, whose output feeds a
@@ -643,7 +646,7 @@ in place. The streamed-bytes reduction is
 \end{equation}
 which for the selective-filter benchmark of \S\ref{sec:eval} (one
 4-key conjunct against four 256-key disjunction legs) removes 98\% of
-input bytes and yields $7.1\us$ versus $241\us$ unpruned; enabling the
+input bytes and yields $7.4\us$ versus $241\us$ unpruned; enabling the
 automatic derivation improved the full 25k-tree corpus by 15.3\%
 (criterion's change-detection test over 10 samples of 20\,s,
 $p < 0.05$). Relative to runtime masking for flat
@@ -665,7 +668,7 @@ into enclosing plans. Within operators, intersection fuses population
 count into the word-level AND and abandons a key on emptiness; per-key
 folds order operands most-selective-first; partner-major passes skip
 dead slots. A filter containing a contradictory subexpression evaluates
-in $143\nsu$ against $738\us$ for the better baseline build, since
+in $147\nsu$ against $705\us$ for the better baseline build, since
 the expensive sibling is never executed; we report this as a property
 of guard
 placement rather than a headline result, and note the baseline's
@@ -699,7 +702,9 @@ the default baseline, rustc 1.98.0-nightly for the baseline's
 per benchmark (corpus: 10 $\times$ 20\,s), typical confidence
 half-widths under 2\%. Baselines: Rust \texttt{roaring} 0.11.4 in both
 configurations --- the default build (scalar array kernels; what
-stable-toolchain users run) and the nightly-only \texttt{simd} build ---
+stable-toolchain users run) and the nightly-only \texttt{simd}
+build\footnote{Documented by the library as in active development; we
+include it as its strongest available configuration.} ---
 interleaved by a two-pass runner into one report, then a dedicated
 third pass re-measures the \fb{} cells alone under the same nightly
 build. The third pass exists because sub-microsecond \fb{} cells drift
@@ -723,7 +728,7 @@ container regimes; all 36 cells of all three systems come from one
 run of the protocol above. \fb{} wins 34 cells outright against both
 builds: every sorted-array cell ($1.21$--$12.9\times$ over default,
 $1.21$--$3.0\times$ over SIMD), every intersection cell
-($1.06$--$6.0\times$), every union cell, and every dense-difference
+($1.08$--$6.0\times$ from the printed medians), every union cell, and every dense-difference
 cell --- the roofline audit behind Table~\ref{tab:constants} turned
 dense difference from parity into $1.4$--$7.0\times$. The remaining
 two cells (run difference at 2- and 4-way) sit within $\pm 6\%$ of
@@ -778,7 +783,7 @@ $\vee$ & dense & 4.90 / 5.20 / 5.20 & 9.70 / 11.4 / 11.4 & 20.2 / 23.8 / 23.7 & 
 $\vee$ & runs & 0.84 / 0.91 / 0.89 & 1.50 / 2.20 / 2.10 & 3.00 / 4.70 / 4.70 & 5.60 / 7.30 / 7.10 \\
 $\setminus$ & sparse & 11.4 / 51.0 / 17.8 & 31.4 / 343.1 / 49.6 & 71.1 / 915.6 / 115.2 & 173.4 / 1970 / 275.0 \\
 $\setminus$ & dense & 4.00 / 5.40 / 5.40 & 9.50 / 50.9 / 49.8 & 19.3 / 131.4 / 134.2 & 58.3 / 239.9 / 245.1 \\
-$\setminus$ & runs & 0.59 / 0.57 / 0.61 & 1.10 / 1.00 / 1.00 & 2.00 / 2.10 / 2.10 & 3.50 / 3.70 / 3.80 \\
+$\setminus$ & runs & 0.59 / 0.57 / 0.61 & 1.06 / 1.00 / 1.00 & 2.00 / 2.10 / 2.10 & 3.50 / 3.70 / 3.80 \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -920,16 +925,23 @@ mis-dispatch frequency against an oracle is open. The evaluation is
 single-threaded; the per-thread pool design has not been characterized
 under concurrency.
 
-\section{Deployment and the Incumbent Substrate}
+\section{Industrial Context: the Deployed Predecessor}
 \label{sec:deployment}
 
-\fb{} is the successor to the filtering substrate of Exa, a commercial
-web-scale search engine, where every boolean filter predicate is
-evaluated against frozen per-segment bitmaps served from memory maps.
-Plans are per-(expression, segment) --- the analysis runs against each
-segment's exact leaf metadata, which is what makes its guarantees
-possible, and its cost sits on the query path exactly as in every
-measurement of \S\ref{sec:eval}.
+The production evidence in this paper attaches to FROZ-v2, the
+filtering substrate deployed at Exa, a commercial web-scale search
+engine: every boolean filter predicate in production is evaluated by
+it against frozen per-segment bitmaps served from memory maps, with
+per-(expression, segment) analysis on the query path. That deployment
+is what validated the regime this paper's design assumes --- immutable
+segments from an indexing pipeline, exact leaf metadata, allocation
+discipline on the serving path, per-query planning cheap enough to
+afford. \fb{} was extracted from that substrate as its intended
+successor; it shares the container algebra, kernel class, arena
+execution, and a runtime hole-punching mode, but carries its decisions
+in plans rather than re-deriving them per evaluation. \fb{} itself
+has not yet served production traffic; its industrial claim is the
+strict, measured improvement over the system that does.
 
 \textbf{Head-to-head against the incumbent.} The deployed substrate
 (``FROZ-v2''), from which \fb{} was extracted, is the sharpest
@@ -947,7 +959,9 @@ only flatters it, since production pays per-operation metric costs
 \begin{table}[t]
 \caption{\fb{} vs.\ the deployed incumbent (FROZ-v2), identical
 workloads, medians; incumbent shown plain and with its runtime
-hole-punching enabled.}
+hole-punching enabled. Measured in its own interleaved run, so \fb{}
+cells differ by a few percent from Tables~\ref{tab:sweep}
+and~\ref{tab:trees}' dedicated-pass numbers.}
 \label{tab:incumbent}
 \small
 \begin{tabular}{lrrr}
@@ -971,7 +985,11 @@ after the roofline audit, sparse intersection by $1.9$--$3.3\times$,
 run cells by $1.3$--$1.6\times$, and every union cell --- including
 binary sparse union ($1.28\times$), the incumbent's last hold, taken
 by the recalibrated one-shot promotion rule of \S\ref{sec:dispatch}.
-On eight random shape-class trees \fb{} wins
+Attribution is stated honestly: part of the per-cell margin is owed to
+kernel work that postdates the extraction (the roofline-audit rows of
+Table~\ref{tab:abl}), so the per-cell multiples mix planning and
+kernel effects; the corpus aggregate and the guarantee set are the
+planning-layer delta. On eight random shape-class trees \fb{} wins
 five, ties one, and loses two (worst $0.50\times$ on one 49-leaf
 shape, an unresolved offender). The aggregate corpus gain over this
 incumbent is deliberately reported as what it is --- $+16\%$ plain,
@@ -982,10 +1000,12 @@ tails it removes (unpunched selective filters, $31\times$; union
 promotion on DNF shapes, $3.6\times$; every sparse-difference shape,
 $5$--$12\times$) and in the guarantees --- allocation-freeness, the
 memory bound, static liveness --- that per-evaluation re-analysis
-cannot emit. A fleet-scale production characterization (tail-latency
-distributions, filter-shape statistics) remains beyond this paper's
-scope; the incumbent comparison above was measured on the same
-hardware and protocol as every other number reported here.
+cannot emit. The pending step for the successor is deployment
+evidence of its own --- shadow traffic against replayed production
+filter traces on server-class hardware, with tail-latency
+distributions and filter-shape statistics; the incumbent comparison
+above was measured on the same hardware and protocol as every other
+number reported here.
 
 \section{Conclusion}
 
@@ -1221,13 +1241,13 @@ R. P. A. Petrick, J. Wells, K. Hammond. Proof-carrying plans.
 \bibitem{teb2020} H. Lang, A. Beischl, V. Leis, P. Boncz, T. Neumann,
 A. Kemper. Tree-encoded bitmaps. \emph{SIGMOD}, 2020.
 
-\bibitem{ngom2021} A. Ngom, P. Menon, M. Butrovich, L. Ma, W. S. Lim,
-T. C. Mowry, A. Pavlo. Filter representation in vectorized query
-execution. \emph{DaMoN}, 2021.
-
 \bibitem{fesia2020} J. Zhang, Y. Lu, D. G. Spampinato, F. Franchetti.
 FESIA: a fast and SIMD-efficient set intersection approach on modern
 CPUs. \emph{ICDE}, 2020.
+
+\bibitem{ngom2021} A. Ngom, P. Menon, M. Butrovich, L. Ma, W. S. Lim,
+T. C. Mowry, A. Pavlo. Filter representation in vectorized query
+execution. \emph{DaMoN}, 2021.
 
 \bibitem{diez2021} G. D\'iez-Ca\~nas. Faster-than-native alternatives
 for x86 VP2INTERSECT instructions. arXiv:2112.06342, 2021.
