@@ -184,6 +184,169 @@ fn decomp(c: &mut Criterion) {
     }
     g.finish();
 }
+
+// Memory/word-op roofline: unit throughput of every bitmap primitive at
+// container scale, so cell times decompose against measured ceilings — plus
+// the two bitmap→array extraction algorithms (current per-bit vs byte-table).
+#[cfg(feature = "internals")]
+fn membw(c: &mut Criterion) {
+    use frostbit::container::{as_bitmap, as_bitmap_mut, Data};
+    use frostbit::ops::simd as k;
+
+    let mut st = 0xBEEF_CAFE_u64;
+    let mk_bitmap = |card: usize, st: &mut u64| -> Vec<u8> {
+        let mut buf = vec![0u8; 8192];
+        {
+            let bm = as_bitmap_mut(&mut buf);
+            let mut n = 0;
+            while n < card {
+                let v = (splitmix64(st) % 65536) as usize;
+                if bm[v / 64] & (1 << (v % 64)) == 0 {
+                    bm[v / 64] |= 1 << (v % 64);
+                    n += 1;
+                }
+            }
+        }
+        buf
+    };
+    let a5000 = mk_bitmap(5000, &mut st);
+    let b5000 = mk_bitmap(5000, &mut st);
+    let a3900 = mk_bitmap(3900, &mut st);
+    let a380 = mk_bitmap(380, &mut st);
+    let vals800: Vec<u16> = {
+        let mut s = std::collections::BTreeSet::new();
+        while s.len() < 800 {
+            s.insert((splitmix64(&mut st) % 65536) as u16);
+        }
+        s.into_iter().collect()
+    };
+    let mut dst = a5000.clone();
+    let mut out16 = vec![0u16; 8192];
+
+    // Byte-table extraction prototype: 256-row table of in-byte bit offsets.
+    let table: Vec<[u16; 8]> = (0..256usize)
+        .map(|b| {
+            let (mut row, mut k) = ([0u16; 8], 0);
+            for bit in 0..8 {
+                if b & (1 << bit) != 0 {
+                    row[k] = bit as u16;
+                    k += 1;
+                }
+            }
+            row
+        })
+        .collect();
+
+    let mut g = c.benchmark_group("membw");
+    g.bench_function("copy8k", |b| {
+        b.iter(|| k::copy(as_bitmap_mut(&mut dst), black_box(as_bitmap(&a5000))))
+    });
+    g.bench_function("or8k", |b| {
+        b.iter(|| k::or(as_bitmap_mut(&mut dst), black_box(as_bitmap(&b5000))))
+    });
+    g.bench_function("or_count8k", |b| {
+        b.iter(|| black_box(k::or_count(as_bitmap_mut(&mut dst), black_box(as_bitmap(&b5000)))))
+    });
+    g.bench_function("and_count8k", |b| {
+        b.iter(|| black_box(k::and_count(as_bitmap_mut(&mut dst), black_box(as_bitmap(&b5000)))))
+    });
+    g.bench_function("andnot_into_count8k", |b| {
+        b.iter(|| {
+            black_box(k::andnot_into_count(
+                as_bitmap_mut(&mut dst),
+                black_box(as_bitmap(&a5000)),
+                black_box(as_bitmap(&b5000)),
+            ))
+        })
+    });
+    g.bench_function("popcount8k", |b| b.iter(|| black_box(k::popcount(as_bitmap(&a5000)))));
+    g.bench_function("clear8k", |b| b.iter(|| k::clear(as_bitmap_mut(&mut dst))));
+    g.bench_function("scatter800", |b| {
+        b.iter(|| k::set_values(as_bitmap_mut(&mut dst), black_box(&vals800)))
+    });
+    // andnot_into_count variants: isolate the popcount accumulator chain.
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::*;
+        let (av, bv) = (a5000.clone(), b5000.clone());
+        g.bench_function("andnot_into_4acc", |bch| {
+            bch.iter(|| unsafe {
+                let d = as_bitmap_mut(&mut dst).as_mut_ptr();
+                let a = as_bitmap(&av).as_ptr();
+                let b = as_bitmap(&bv).as_ptr();
+                let (mut c0, mut c1, mut c2, mut c3) =
+                    (vdupq_n_u16(0), vdupq_n_u16(0), vdupq_n_u16(0), vdupq_n_u16(0));
+                let mut i = 0usize;
+                while i < 1024 {
+                    let r0 = vbicq_u64(vld1q_u64(a.add(i)), vld1q_u64(b.add(i)));
+                    let r1 = vbicq_u64(vld1q_u64(a.add(i + 2)), vld1q_u64(b.add(i + 2)));
+                    let r2 = vbicq_u64(vld1q_u64(a.add(i + 4)), vld1q_u64(b.add(i + 4)));
+                    let r3 = vbicq_u64(vld1q_u64(a.add(i + 6)), vld1q_u64(b.add(i + 6)));
+                    vst1q_u64(d.add(i), r0);
+                    vst1q_u64(d.add(i + 2), r1);
+                    vst1q_u64(d.add(i + 4), r2);
+                    vst1q_u64(d.add(i + 6), r3);
+                    c0 = vpadalq_u8(c0, vcntq_u8(vreinterpretq_u8_u64(r0)));
+                    c1 = vpadalq_u8(c1, vcntq_u8(vreinterpretq_u8_u64(r1)));
+                    c2 = vpadalq_u8(c2, vcntq_u8(vreinterpretq_u8_u64(r2)));
+                    c3 = vpadalq_u8(c3, vcntq_u8(vreinterpretq_u8_u64(r3)));
+                    i += 8;
+                }
+                let s = vaddq_u16(vaddq_u16(c0, c1), vaddq_u16(c2, c3));
+                black_box(vaddlvq_u16(s))
+            })
+        });
+        g.bench_function("andnot_into_nocount", |bch| {
+            bch.iter(|| unsafe {
+                let d = as_bitmap_mut(&mut dst).as_mut_ptr();
+                let a = as_bitmap(&av).as_ptr();
+                let b = as_bitmap(&bv).as_ptr();
+                let mut i = 0usize;
+                while i < 1024 {
+                    vst1q_u64(d.add(i), vbicq_u64(vld1q_u64(a.add(i)), vld1q_u64(b.add(i))));
+                    i += 2;
+                }
+                black_box(d)
+            })
+        });
+    }
+
+    for (name, bmb, card) in [("extract3900", &a3900, 3900usize), ("extract380", &a380, 380)] {
+        let data = Data::Bitmap(as_bitmap(bmb));
+        g.bench_function(format!("{name}/current"), |b| {
+            b.iter(|| black_box(data.write_sorted(black_box(&mut out16))))
+        });
+        g.bench_function(format!("{name}/byte_table"), |b| {
+            b.iter(|| {
+                let bm = as_bitmap(bmb);
+                let mut n = 0usize;
+                for (w, &word) in bm.iter().enumerate() {
+                    if word == 0 {
+                        continue;
+                    }
+                    let base = (w * 64) as u16;
+                    for byte in 0..8 {
+                        let bits = ((word >> (byte * 8)) & 0xFF) as usize;
+                        if bits == 0 {
+                            continue;
+                        }
+                        let row = &table[bits];
+                        let off = base + (byte * 8) as u16;
+                        for j in 0..8 {
+                            out16[n + j] = row[j] + off;
+                        }
+                        n += bits.count_ones() as usize;
+                    }
+                }
+                black_box(n)
+            })
+        });
+        black_box(card);
+    }
+    g.finish();
+}
+#[cfg(not(feature = "internals"))]
+fn membw(_c: &mut Criterion) {}
 #[cfg(not(feature = "internals"))]
 fn decomp(_c: &mut Criterion) {}
 
@@ -291,6 +454,6 @@ criterion_group! {
         .sample_size(30)
         .warm_up_time(Duration::from_millis(1200))
         .measurement_time(Duration::from_secs(4));
-    targets = bench, decomp, branches
+    targets = bench, decomp, branches, membw
 }
 criterion_main!(benches);

@@ -917,10 +917,14 @@ fn run_fold(
 }
 
 /// Finish a bitmap accumulator: downgrade to an array when sparse enough
-/// (cheaper downstream folds + smaller output), else keep the bitmap. Returns
-/// the recorded `(type, data bytes)`.
+/// (cheaper downstream folds + smaller output), else keep the bitmap. The
+/// boundary is half the array limit: above it, extraction (~0.5 ns/value)
+/// buys at most a 2x-shrinking output while costing more than the fold that
+/// produced it — a card-3900 extraction was 63% of a dense 4-way difference.
+/// `serialize_compact` still canonicalizes terminal results. Returns the
+/// recorded `(type, data bytes)`.
 fn finish_bitmap(arena: &mut OpArena, i: usize, card: u32) -> (u8, usize) {
-    if card == 0 || card > ARRAY_MAX_SIZE as u32 {
+    if card == 0 || card > (ARRAY_MAX_SIZE / 2) as u32 {
         return (CT_BITMAP, BITMAP_BYTES);
     }
     let (slot, scratch) = arena.slot_and_scratch(i);

@@ -30,11 +30,11 @@ mod popcount;
 pub use array_diff::array_diff;
 pub use array_intersect::array_intersect;
 pub use array_union::array_union;
-pub(crate) use bitmap_and::and_count;
-pub(crate) use bitmap_andnot::{andnot, andnot_count, andnot_into_count};
-pub(crate) use bitmap_build::{clear, clear_runs, clear_values, copy, set_runs, set_values};
-pub(crate) use bitmap_or::{or, or_count};
-pub(crate) use popcount::popcount;
+pub use bitmap_and::and_count;
+pub use bitmap_andnot::{andnot, andnot_count, andnot_into_count};
+pub use bitmap_build::{clear, clear_runs, clear_values, copy, set_runs, set_values};
+pub use bitmap_or::{or, or_count};
+pub use popcount::popcount;
 
 // --- shared aarch64 NEON word loops -----------------------------------------
 //
@@ -67,11 +67,23 @@ pub(super) unsafe fn fold_count_neon(
     combine: impl Fn(std::arch::aarch64::uint64x2_t, std::arch::aarch64::uint64x2_t) -> std::arch::aarch64::uint64x2_t,
 ) -> u32 {
     use std::arch::aarch64::*;
-    let mut acc = vdupq_n_u16(0);
-    for i in (0..BITMAP_WORDS).step_by(2) {
-        let r = combine(vld1q_u64(dst.as_ptr().add(i)), vld1q_u64(src.as_ptr().add(i)));
-        vst1q_u64(dst.as_mut_ptr().add(i), r);
-        acc = vpadalq_u8(acc, vcntq_u8(vreinterpretq_u8_u64(r)));
+    // Four independent count accumulators — a single `vpadalq` chain is
+    // latency-bound well below the streaming rate (see bitmap_andnot).
+    let (mut c0, mut c1, mut c2, mut c3) =
+        (vdupq_n_u16(0), vdupq_n_u16(0), vdupq_n_u16(0), vdupq_n_u16(0));
+    for i in (0..BITMAP_WORDS).step_by(8) {
+        let r0 = combine(vld1q_u64(dst.as_ptr().add(i)), vld1q_u64(src.as_ptr().add(i)));
+        let r1 = combine(vld1q_u64(dst.as_ptr().add(i + 2)), vld1q_u64(src.as_ptr().add(i + 2)));
+        let r2 = combine(vld1q_u64(dst.as_ptr().add(i + 4)), vld1q_u64(src.as_ptr().add(i + 4)));
+        let r3 = combine(vld1q_u64(dst.as_ptr().add(i + 6)), vld1q_u64(src.as_ptr().add(i + 6)));
+        vst1q_u64(dst.as_mut_ptr().add(i), r0);
+        vst1q_u64(dst.as_mut_ptr().add(i + 2), r1);
+        vst1q_u64(dst.as_mut_ptr().add(i + 4), r2);
+        vst1q_u64(dst.as_mut_ptr().add(i + 6), r3);
+        c0 = vpadalq_u8(c0, vcntq_u8(vreinterpretq_u8_u64(r0)));
+        c1 = vpadalq_u8(c1, vcntq_u8(vreinterpretq_u8_u64(r1)));
+        c2 = vpadalq_u8(c2, vcntq_u8(vreinterpretq_u8_u64(r2)));
+        c3 = vpadalq_u8(c3, vcntq_u8(vreinterpretq_u8_u64(r3)));
     }
-    vaddlvq_u16(acc)
+    vaddlvq_u16(vaddq_u16(vaddq_u16(c0, c1), vaddq_u16(c2, c3)))
 }

@@ -6,7 +6,7 @@ use crate::format::BITMAP_WORDS;
 
 /// `dst |= src`.
 #[inline]
-pub(crate) fn or(dst: &mut Bitmap, src: &Bitmap) {
+pub fn or(dst: &mut Bitmap, src: &Bitmap) {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         if is_x86_feature_detected!("avx512f") {
@@ -27,7 +27,7 @@ pub(crate) fn or(dst: &mut Bitmap, src: &Bitmap) {
 
 /// `dst |= src`, returning the result's population count in one pass.
 #[inline]
-pub(crate) fn or_count(dst: &mut Bitmap, src: &Bitmap) -> u32 {
+pub fn or_count(dst: &mut Bitmap, src: &Bitmap) -> u32 {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vpopcntdq") {

@@ -8,7 +8,7 @@ use super::Bitmap;
 use crate::format::BITMAP_WORDS;
 
 #[inline]
-pub(crate) fn popcount(b: &Bitmap) -> u32 {
+pub fn popcount(b: &Bitmap) -> u32 {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vpopcntdq") {

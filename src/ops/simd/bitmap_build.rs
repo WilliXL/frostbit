@@ -6,36 +6,36 @@ use super::Bitmap;
 use crate::container::Run;
 
 #[inline]
-pub(crate) fn copy(dst: &mut Bitmap, src: &Bitmap) {
+pub fn copy(dst: &mut Bitmap, src: &Bitmap) {
     dst.copy_from_slice(src);
 }
 
 #[inline]
-pub(crate) fn clear(dst: &mut Bitmap) {
+pub fn clear(dst: &mut Bitmap) {
     dst.fill(0);
 }
 
 #[inline]
-pub(crate) fn set_values(dst: &mut Bitmap, vals: &[u16]) {
+pub fn set_values(dst: &mut Bitmap, vals: &[u16]) {
     for &v in vals {
         dst[v as usize / 64] |= 1u64 << (v as usize % 64);
     }
 }
 
 #[inline]
-pub(crate) fn clear_values(dst: &mut Bitmap, vals: &[u16]) {
+pub fn clear_values(dst: &mut Bitmap, vals: &[u16]) {
     for &v in vals {
         dst[v as usize / 64] &= !(1u64 << (v as usize % 64));
     }
 }
 
-pub(crate) fn set_runs(dst: &mut Bitmap, runs: &[Run]) {
+pub fn set_runs(dst: &mut Bitmap, runs: &[Run]) {
     for r in runs {
         fill(dst, r.start as usize, r.end() as usize, true);
     }
 }
 
-pub(crate) fn clear_runs(dst: &mut Bitmap, runs: &[Run]) {
+pub fn clear_runs(dst: &mut Bitmap, runs: &[Run]) {
     for r in runs {
         fill(dst, r.start as usize, r.end() as usize, false);
     }
