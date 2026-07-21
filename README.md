@@ -217,12 +217,12 @@ indicative, ±a few percent run to run.
 
 | shape | frostbit | roaring |
 |---|---:|---:|
-| `conj5` — nested ANDs, flattened to one 5-way | **19 µs** | 302 µs |
-| `filter` — `base ∩ OR(domains) ∩ (¬lang)` | **18 µs** | 42 µs |
-| `dnf` — OR of AND-groups | **52 µs** | 617 µs |
-| `cnf3` — AND of OR-groups | **73 µs** | 111 µs |
+| `conj5` — nested ANDs, flattened to one 5-way | **18 µs** | 264 µs |
+| `filter` — `base ∩ OR(domains) ∩ (¬lang)` | **16 µs** | 41 µs |
+| `dnf` — OR of AND-groups | **51 µs** | 613 µs |
+| `cnf3` — AND of OR-groups | **71 µs** | 106 µs |
 
-Randomly-generated trees (2–38 leaves) win 1.5×–6.0× across the board.
+Randomly-generated trees (2–38 leaves) win 1.5×–6.5× across the board.
 
 **25,000-tree corpus** — deterministic random trees up to 100 leaves and 15
 levels deep (per-tree shape profiles: deep AND-chains, flat 100-way ORs,
@@ -231,47 +231,40 @@ diff-heavy filters; 100 trees are guaranteed 100-leaf *and* 15-deep;
 
 | | frostbit | roaring |
 |---|---:|---:|
-| whole corpus, per-query analysis included | **2.62 s** (9.5K trees/s) | 6.83 s (3.7K trees/s) |
+| whole corpus, per-query analysis included | **2.40 s** (10.4K trees/s) | 6.79 s (3.7K trees/s) |
 
 **Query-shape optimizations:**
 
 | | frostbit | roaring |
 |---|---:|---:|
-| **Hole-punching** — narrow filter ∩ wide OR-groups | **7.4 µs** *(241 µs un-punched)* | 1.50 ms |
-| **Short-circuit** — AND with an empty subtree | **145 ns** | 753 µs |
+| **Hole-punching** — narrow filter ∩ wide OR-groups | **7.4 µs** *(241 µs un-punched)* | 1.42 ms |
+| **Short-circuit** — AND with an empty subtree | **147 ns** | 705 µs |
 
 **N-way flat ops (8-way):**
 
 | 8-way | frostbit | roaring |
 |---|---:|---:|
-| intersect · sparse arrays | **17 µs** | 65 µs |
+| intersect · sparse arrays | **16 µs** | 77 µs |
 | intersect · dense bitmaps | **13 µs** | 20 µs |
 | intersect · run containers | **1.2 µs** | 2.7 µs |
 | union · sparse arrays | **117 µs** | 142 µs |
 | union · dense bitmaps | **20 µs** | 24 µs |
-| union · run containers | **3.1 µs** | 4.8 µs |
-| difference · sparse arrays | **74 µs** | 948 µs |
-| difference · dense bitmaps | **55 µs** | 134 µs |
-| difference · run containers | **1.8 µs** | 2.1 µs |
+| union · run containers | **3.0 µs** | 4.7 µs |
+| difference · sparse arrays | **71 µs** | 916 µs |
+| difference · dense bitmaps | **19 µs** | 131 µs |
+| difference · run containers | **2.0 µs** | 2.1 µs |
 
 Across the full 2–16-way sweep frostbit wins **34 of 36 cells outright and
-loses none**: every sparse-array cell (1.2×–12.9×: roaring's array kernels
-are scalar in the default build, while frostbit's SIMD shuffle-merges —
-CRoaring-style compare-all-pairs and Inoue–Taura rotate networks, NEON +
-x86 — always run), every intersection cell (1.04×–5.4×), and every union
-cell (1.04×–2.9×); the remaining two (binary dense and run difference)
-sit within ±4% and trade sides run to run. Wide skewed conjunctions fold
-partners in ascending cardinality when the spread pays for the sort
-(conj5 halved: 35 → 19 µs), and the array-intersect kernel rejects
-disjoint value ranges in O(1) (banded 2-way AND: 2.7 µs → 0.6 µs). The run cells were losses until
-two rounds of profiling: tiny inputs now take trivially-sound B-clamped
-plans instead of a capacity walk (binary run diff 0.68× → parity, binary
-run intersect 0.95× → 1.32×), and the run folds gained the
-empty-accumulator early exit the other paths always had — the sweep's
-16-way run intersection *annihilates* (phase-shifted windows sweep apart
-by ~operand 5), and handling collapse as cheaply as `MultiOps` flipped it
-0.87× → 1.04× (8-way, partially annihilating: 2.26×). Statically disjoint
-intersections skip their fold entirely.
+loses none**: every sparse-array cell (1.2×–12.9×), every intersection cell
+(1.06×–6.0×), every union cell, and every dense-difference cell — a word-op
+roofline audit (`membw` bench group) found the andnot kernel latency-bound
+and the bitmap→array extraction over-eager, and fixing both turned dense
+difference from parity into **1.4×–7.0×**. The two remaining cells (run
+difference at 2-/4-way) sit within ±6% and trade sides run to run. Flat
+one-shot unions promote to bitmap accumulation on a crossover derived from
+measured kernel constants (2-way sparse union 46 → 31 µs); tree-interior
+unions keep the conservative rule — aggressive promotion inside trees
+re-measured at cnf3 +62%, corpus +16%, and stays rejected.
 
 ### vs roaring's nightly `simd` build
 
@@ -280,18 +273,18 @@ The same comparisons against `roaring` with its (nightly-only, off-by-default)
 
 | | frostbit | roaring `simd` |
 |---|---:|---:|
-| `conj5` / `filter` / `dnf` / `cnf3` | **19 / 18 / 52 / 73 µs** | 71 / 41 / 114 / 94 µs |
-| 25k-tree corpus | **2.62 s** | 5.75 s |
-| hole-punching (punched) | **7.4 µs** | 1.43 ms |
-| short-circuit | **145 ns** | 719 µs |
-| 8-way intersect (sparse / dense / runs) | **17 / 13 / 1.2 µs** | 28 / 21 / 2.7 µs |
-| 8-way union (sparse / dense / runs) | **117 / 21 / 3.1 µs** | 141 / 24 / 4.9 µs |
-| 8-way difference (sparse / dense / runs) | **74 / 55 / 1.8 µs** | 126 / 138 / 2.1 µs |
+| `conj5` / `filter` / `dnf` / `cnf3` | **18 / 16 / 51 / 71 µs** | 70 / 41 / 111 / 93 µs |
+| 25k-tree corpus | **2.40 s** | 5.61 s |
+| hole-punching (punched) | **7.3 µs** | 1.41 ms |
+| short-circuit | **147 ns** | 715 µs |
+| 8-way intersect (sparse / dense / runs) | **16 / 13 / 1.2 µs** | 28 / 20 / 2.7 µs |
+| 8-way union (sparse / dense / runs) | **116 / 20 / 3.0 µs** | 141 / 24 / 4.7 µs |
+| 8-way difference (sparse / dense / runs) | **71 / 19 / 2.0 µs** | 115 / 134 / 2.1 µs |
 
-Every tree shape and the corpus go to frostbit (1.2×–5.8×). The flat-op sweep
+Every tree shape and the corpus go to frostbit (1.3×–6.5×). The flat-op sweep
 mirrors the default-build picture: 34 of 36 cells outright and no losses —
-every sparse cell (1.20×–2.9×), every intersection and union cell, with the
-same two binary-difference cells inside the noise band.
+every sparse, intersection, union, and dense-difference cell, with the same
+two run-difference cells inside the noise band.
 
 ## Features
 
