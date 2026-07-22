@@ -240,9 +240,11 @@ containing no decision code.
 CONCISE~\cite{colantonio2010}) optimizes space and bulk boolean
 throughput; sorting amplifies run lengths~\cite{lemire2010sorting}.
 Roaring~\cite{chambi2016,lemire2016roaring,lemire2018} introduced the
-two-level container design \fb{} adopts; \fb's frozen format transcodes
-losslessly to and from portable Roaring serialization at container
-granularity. Index-level designs --- variant indexes~\cite{oneil1997}, bitmap
+two-level container design \fb{} adopts; zero-copy frozen bitmap
+formats have precedents in CRoaring's \texttt{frozen\_view} and
+Java's \texttt{ImmutableRoaringBitmap}, and \fb's format (not claimed
+as a contribution) transcodes losslessly to and from portable Roaring
+serialization at container granularity. Index-level designs --- variant indexes~\cite{oneil1997}, bitmap
 join indices~\cite{oneil1995}, bit-sliced arithmetic~\cite{rinfret2001},
 design-space studies~\cite{chan1998} --- and updatable structures
 (UpBit~\cite{upbit2016}, TEB~\cite{teb2020,teb2022},
@@ -722,7 +724,10 @@ own allocation traffic dominates that noise floor, show no such drift
 and keep their interleaved numbers. All $n$-ary baseline
 calls go through the library's \texttt{MultiOps} trait, its documented
 fast path for merging many bitmaps (lazy copy-on-write promotion,
-largest-first ordering); binary nodes use the pairwise operators. Corpus
+largest-first ordering; its $n$-ary difference is a sequential
+pairwise subtraction, which the sparse-difference multiples of
+Table~\ref{tab:sweep} substantially reflect); binary nodes use the
+pairwise operators. Corpus
 measurements build, plan, and materialize every tree inside the timed
 region (the per-query planning cost paid in full); named-shape rows
 time materialization on a prebuilt expression, which is the plan-reuse
