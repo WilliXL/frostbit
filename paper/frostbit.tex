@@ -744,8 +744,11 @@ dense difference from parity into $1.35$--$7.0\times$ (printed medians, both bui
 two cells (run difference at 2- and 4-way) sit within $\pm 6\%$ of
 both builds. The win/tie criterion is sign stability: a cell counts as
 a win only if its direction is unchanged across repeated runs of the
-full protocol; these two are the only cells whose sign flips, and the
-sweep contains no cell where either build beats \fb{} beyond noise.
+full protocol; these two are the only cells whose sign flips (across
+the last four full-protocol runs they measured $0.94$--$1.03\times$
+against the default build and $0.96$--$1.06\times$ against SIMD), and
+the sweep contains no cell where either build beats \fb{} beyond
+noise.
 
 The run-container regime did not start this way, and its repair is a
 two-part case study. The first part priced the analysis pass: run
@@ -840,7 +843,7 @@ and root-cause analysis of the worst offenders --- is part of the
 methodology: it directed two of the shipped mechanisms (the hoisted
 bitmap-membership loop, reducing the audit's offender count from 1{,}245
 to 743 of 25{,}000; then automatic liveness derivation, the corpus-level
-$-15.3\%$).
+$-15.2\%$).
 
 \subsection{Ablations}
 \label{sec:eval:abl}
@@ -992,17 +995,17 @@ cnf3 (\textmu s) & \textbf{71.0} & 77.5 & 79.6 \\
 
 On the flat sweep (Table~\ref{tab:incumbentsweep}) \fb{} wins all 36
 cells, none within $5\%$:
-sparse difference by $5.5$--$12\times$ (the incumbent folds its
-$n$-ary difference pairwise), dense difference by $2.8$--$5.3\times$
-after the roofline audit, sparse intersection by $1.9$--$3.3\times$,
-run cells by $1.3$--$1.6\times$, and every union cell --- including
+sparse difference by $5.6$--$11.6\times$ (the incumbent folds its
+$n$-ary difference pairwise), dense difference by $1.2$--$5.3\times$,
+sparse intersection by $1.8$--$3.3\times$,
+run cells by $1.25$--$1.6\times$, and every union cell --- including
 binary sparse union ($1.28\times$), the incumbent's last hold, taken
 by the recalibrated one-shot promotion rule of \S\ref{sec:dispatch}.
 Attribution is stated honestly: part of the per-cell margin is owed to
 kernel work that postdates the extraction (the roofline-audit rows of
-Table~\ref{tab:abl}), so the per-cell multiples mix planning and
-kernel effects; the corpus aggregate and the guarantee set are the
-planning-layer delta. On eight random shape-class trees \fb{} wins
+Table~\ref{tab:abl}), so the per-cell multiples --- and, to a lesser
+degree, the corpus aggregate --- mix planning and kernel effects; only
+the guarantee set is attributable purely to the planning layer. On eight random shape-class trees \fb{} wins
 five, ties one, and loses two (worst $0.50\times$ on one 49-leaf
 shape, an unresolved offender). The aggregate corpus gain over this
 incumbent is deliberately reported as what it is --- $+16\%$ plain,
