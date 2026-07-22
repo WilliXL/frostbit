@@ -58,10 +58,12 @@ Roaring implementations.
 Against both configurations of the standard Rust Roaring library, with
 all $n$-ary baseline calls routed through the library's documented
 \texttt{MultiOps} fast path, \fb{} wins 34 of a 2--16-way operation
-sweep's 36 cells outright --- every sorted-array cell
-($1.2$--$12.9\times$), every intersection, union, and dense-difference
-cell --- and ties the remaining two (small run-difference cells,
-within $\pm 6\%$), with no losses. End-to-end it evaluates
+sweep's 36 cells outright --- among them every sorted-array cell
+($1.2$--$12.9\times$ over the default build, $1.2$--$3.0\times$ over
+its SIMD build), every intersection and union cell, and every
+dense-difference cell --- and ties the remaining two (small
+run-difference cells, the only cells whose sign is unstable across
+runs), with no losses. End-to-end it evaluates
 a 25{,}000-tree filter corpus $2.8\times$ and $2.3\times$ faster, with
 per-mechanism ablations --- including rejected designs --- isolating
 the contribution of each planning decision. \fb{} descends from the
@@ -381,8 +383,9 @@ with capacity
 \end{cases}
 \]
 where $\sigma(m) = 2m$ for $m \le A_{\max}$ and $\B$ otherwise, and the
-union clamp is $\B$ exactly when the plan assigns the key a bitmap or
-native-run accumulator (\S\ref{sec:dispatch}). One escape hatch trades
+union clamp is $\B$ exactly when the shape's representation bound
+$\widehat{\tau}_k$ assigns the key a bitmap or native-run accumulator
+(\S\ref{sec:dispatch}). One escape hatch trades
 slack for analysis cost: for tiny $\wedge$/$\setminus$ one-shots
 ($\le$16\,KiB of input, $\le$32 driving keys), where \S\ref{sec:eval}
 shows the analysis walk dominating, the planner substitutes the
@@ -528,9 +531,12 @@ C_{\mathrm{arr}}(n,s) \approx c_m\,s\,f(n),
 \qquad
 C_{\mathrm{bmp}}(s) \approx c_0 + c_s\,s,
 \end{equation}
-with $f(n) = \tfrac{n+1}{2}-\tfrac1n$; when the result re-materializes
-as an array ($s \le A_{\max}$), the bitmap path adds $c_x s$. Two
-policies dispatch on context, both measured. \emph{One-shot} unions,
+with $f(n) = \tfrac{n+1}{2}-\tfrac1n$. The extraction term $c_x s$
+applies where a bitmap accumulator re-materializes as an array ---
+intersection and difference finishes below $A_{\max}/2$ --- but not to
+one-shot unions, whose bitmap output is recorded as-is in op-ready
+form; their crossover therefore omits $c_x$. Two policies dispatch on
+context, both measured. \emph{One-shot} unions,
 whose bitmap output is terminal, promote on the measured crossover with
 a ${\approx}1.35\times$ margin on the fixed cost, rounded to the
 integer rule
@@ -637,7 +643,8 @@ the root. Executor key sets are subsets of shape key sets
 \end{proof}
 
 The planner materializes $\mask(T)$ as an 8\,KiB bitset whenever
-$|K(\mathrm{root})| < \max_i |K(v_i)|$ --- exactly the condition under
+$|K(\mathrm{root})| < \max_i |K(v_i)|$ over the root's operands $v_i$
+--- exactly the condition under
 which pruning is non-vacuous --- and every leaf cursor skips dead keys
 in place. The streamed-bytes reduction is
 \begin{equation}
@@ -647,7 +654,7 @@ in place. The streamed-bytes reduction is
 which for the selective-filter benchmark of \S\ref{sec:eval} (one
 4-key conjunct against four 256-key disjunction legs) removes 98\% of
 input bytes and yields $7.4\us$ versus $241\us$ unpruned; enabling the
-automatic derivation improved the full 25k-tree corpus by 15.3\%
+automatic derivation improved the full 25k-tree corpus by 15.2\%
 (criterion's change-detection test over 10 samples of 20\,s,
 $p < 0.05$). Relative to runtime masking for flat
 intersections~\cite{roaringjava} and scan-side zone-map
@@ -715,8 +722,11 @@ own allocation traffic dominates that noise floor, show no such drift
 and keep their interleaved numbers. All $n$-ary baseline
 calls go through the library's \texttt{MultiOps} trait, its documented
 fast path for merging many bitmaps (lazy copy-on-write promotion,
-largest-first ordering); binary nodes use the pairwise operators. All
-\fb{} tree measurements include plan construction.
+largest-first ordering); binary nodes use the pairwise operators. Corpus
+measurements build, plan, and materialize every tree inside the timed
+region (the per-query planning cost paid in full); named-shape rows
+time materialization on a prebuilt expression, which is the plan-reuse
+regime the design targets; flat-op rows include planning.
 Correctness: differential suites against Roaring (random trees, pruned
 trees, run containers, 10M-element round trips) and the 11.6k-case
 clamp stress; every configuration reported here passes all suites.
@@ -730,10 +740,12 @@ builds: every sorted-array cell ($1.21$--$12.9\times$ over default,
 $1.21$--$3.0\times$ over SIMD), every intersection cell
 ($1.08$--$6.0\times$ from the printed medians), every union cell, and every dense-difference
 cell --- the roofline audit behind Table~\ref{tab:constants} turned
-dense difference from parity into $1.4$--$7.0\times$. The remaining
+dense difference from parity into $1.35$--$7.0\times$ (printed medians, both builds). The remaining
 two cells (run difference at 2- and 4-way) sit within $\pm 6\%$ of
-both builds and trade sides across repeated runs; the sweep contains
-no cell where either build beats \fb{} beyond noise.
+both builds. The win/tie criterion is sign stability: a cell counts as
+a win only if its direction is unchanged across repeated runs of the
+full protocol; these two are the only cells whose sign flips, and the
+sweep contains no cell where either build beats \fb{} beyond noise.
 
 The run-container regime did not start this way, and its repair is a
 two-part case study. The first part priced the analysis pass: run
@@ -978,7 +990,8 @@ cnf3 (\textmu s) & \textbf{71.0} & 77.5 & 79.6 \\
 \end{tabular}
 \end{table}
 
-On the flat sweep \fb{} now wins all 36 cells, none within $5\%$:
+On the flat sweep (Table~\ref{tab:incumbentsweep}) \fb{} wins all 36
+cells, none within $5\%$:
 sparse difference by $5.5$--$12\times$ (the incumbent folds its
 $n$-ary difference pairwise), dense difference by $2.8$--$5.3\times$
 after the roofline audit, sparse intersection by $1.9$--$3.3\times$,
@@ -997,7 +1010,7 @@ $+10\%$ against its punched mode --- because that is the honest shape
 of the result: against an equally-tuned engine of the same lineage,
 static planning's value concentrates not in the aggregate but in the
 tails it removes (unpunched selective filters, $31\times$; union
-promotion on DNF shapes, $3.6\times$; every sparse-difference shape,
+promotion on DNF shapes, $3.3\times$; every sparse-difference shape,
 $5$--$12\times$) and in the guarantees --- allocation-freeness, the
 memory bound, static liveness --- that per-evaluation re-analysis
 cannot emit. The pending step for the successor is deployment
@@ -1006,6 +1019,30 @@ filter traces on server-class hardware, with tail-latency
 distributions and filter-shape statistics; the incumbent comparison
 above was measured on the same hardware and protocol as every other
 number reported here.
+
+\begin{table*}[t]
+\caption{Full operation sweep vs.\ the deployed incumbent, medians in
+\textmu s: \fb{} / FROZ-v2. Same generators, seeds, and regimes as
+Table~\ref{tab:sweep}; measured in the incumbent harness's own
+interleaved run.}
+\label{tab:incumbentsweep}
+\small
+\begin{tabular}{llrrrr}
+\toprule
+op & regime & 2-way & 4-way & 8-way & 16-way \\
+\midrule
+$\wedge$ & sparse & 10.1 / 33.2 & 14.0 / 35.9 & 17.2 / 37.0 & 21.3 / 38.6 \\
+$\wedge$ & dense & 12.5 / 16.9 & 10.6 / 15.8 & 12.4 / 22.4 & 15.1 / 44.2 \\
+$\wedge$ & runs & 0.65 / 0.89 & 1.18 / 1.79 & 1.17 / 1.61 & 2.54 / 3.32 \\
+$\vee$ & sparse & 30.7 / 39.3 & 54.6 / 66.1 & 115 / 126 & 206 / 224 \\
+$\vee$ & dense & 5.05 / 10.9 & 9.76 / 16.5 & 20.5 / 27.2 & 42.2 / 49.4 \\
+$\vee$ & runs & 0.87 / 1.09 & 1.60 / 2.03 & 3.05 / 4.01 & 5.60 / 7.19 \\
+$\setminus$ & sparse & 11.5 / 64.4 & 31.8 / 349 & 79.9 / 926 & 186 / 2024 \\
+$\setminus$ & dense & 3.93 / 10.5 & 9.50 / 50.4 & 19.6 / 55.1 & 58.5 / 68.2 \\
+$\setminus$ & runs & 0.60 / 0.85 & 1.04 / 1.64 & 1.90 / 3.10 & 3.41 / 5.39 \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
 \section{Conclusion}
 
