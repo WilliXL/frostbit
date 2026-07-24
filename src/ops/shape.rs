@@ -38,11 +38,46 @@ impl Meta {
 /// A node's output shape: container metadata, ascending by key.
 pub type Shape = Vec<Meta>;
 
+/// Shapes are the bulk of tree-analysis memory — one entry per container, so a
+/// wide leaf's shape runs to kilobytes — and every one except the root's is
+/// consumed by its parent and dropped. Circulate them instead of reallocating.
+///
+/// A `cache` pool, not working memory: the root's shape is *retained* by the
+/// expression for as long as the caller holds it, so an outstanding shape is
+/// not a fold exceeding its budget.
+mod shape_pool {
+    use super::Shape;
+    use crate::pool::Pool;
+
+    thread_local! {
+        static POOL: Pool<Shape> = const { Pool::cache("shape") };
+    }
+
+    pub(super) fn take(cap: usize) -> Shape {
+        let mut s = POOL.with(|p| p.take(Vec::new));
+        s.clear();
+        s.reserve(cap);
+        s
+    }
+
+    /// Return a shape whose parent has finished reading it.
+    pub(crate) fn put(mut s: Shape) {
+        s.clear();
+        POOL.with(|p| p.put(s));
+    }
+
+    pub(crate) fn clear() {
+        POOL.with(Pool::clear);
+    }
+}
+
+pub(crate) use shape_pool::{clear as clear_shape_pool, put as recycle_shape};
+
 /// Exact shape of a leaf, read from its container index (inline → array form).
 pub fn view_shape(view: &FrozenBitmapView<'_>) -> Shape {
     let mut c = ContainerCursor::new(view);
     // Exactly one entry per container — size it once instead of regrowing.
-    let mut out = Vec::with_capacity(c.container_count());
+    let mut out = shape_pool::take(c.container_count());
     while c.peek_key().is_some() {
         let r = c.get();
         let typ = if r.typ == CT_INLINE { CT_ARRAY } else { r.typ };
@@ -60,8 +95,9 @@ pub fn view_shape(view: &FrozenBitmapView<'_>) -> Shape {
 
 /// Derive the arena [`Plan`] from an output shape.
 pub fn to_plan(op: Op, shape: &Shape) -> Plan {
-    let slots: Vec<SlotPlan> =
-        shape.iter().map(|m| SlotPlan { key: m.key, capacity: m.cap }).collect();
+    let mut slots = crate::ops::plan::take_slots();
+    slots.reserve(shape.len());
+    slots.extend(shape.iter().map(|m| SlotPlan { key: m.key, capacity: m.cap }));
     Plan { op, double: wants_partner_major(op, &slots), slots, scratch_bytes: SCRATCH_BYTES }
 }
 
@@ -92,7 +128,7 @@ fn min_key(curs: &[Cur<'_>]) -> Option<u16> {
 pub fn intersect_shape(inputs: &[Shape]) -> Shape {
     let mut curs: Vec<Cur> = inputs.iter().map(Cur::new).collect();
     // At most the smallest input's key count survives an intersection.
-    let mut out = Vec::with_capacity(inputs.iter().map(Vec::len).min().unwrap_or(0));
+    let mut out = shape_pool::take(inputs.iter().map(Vec::len).min().unwrap_or(0));
     while let Some(key) = min_key(&curs) {
         let (mut present, mut min_card, mut all_run, mut runs) = (0usize, u32::MAX, true, 0usize);
         for c in &mut curs {
@@ -120,7 +156,7 @@ pub fn union_shape(inputs: &[Shape], weights: &[usize]) -> Shape {
     debug_assert_eq!(inputs.len(), weights.len());
     let mut curs: Vec<Cur> = inputs.iter().map(Cur::new).collect();
     // A union spans at least the widest input's keys.
-    let mut out = Vec::with_capacity(inputs.iter().map(Vec::len).max().unwrap_or(0));
+    let mut out = shape_pool::take(inputs.iter().map(Vec::len).max().unwrap_or(0));
     while let Some(key) = min_key(&curs) {
         let (mut sum, mut runs, mut any_bitmap, mut all_run, mut max_single, mut n) =
             (0u32, 0usize, false, true, 0u32, 0usize);
@@ -155,7 +191,7 @@ pub fn union_shape(inputs: &[Shape], weights: &[usize]) -> Shape {
 pub fn diff_shape(inputs: &[Shape]) -> Shape {
     let Some((lhs, rest)) = inputs.split_first() else { return Vec::new() };
     // Output keys are exactly the LHS keys.
-    let mut out = Vec::with_capacity(lhs.len());
+    let mut out = shape_pool::take(lhs.len());
     let mut rhs: Vec<Cur> = rest.iter().map(Cur::new).collect();
     for l in lhs {
         // Gather RHS containers at this key.

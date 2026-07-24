@@ -216,6 +216,7 @@ pub fn clear() {
     crate::expr::clear_stack_pool();
     crate::ops::cursor::clear_scratch_pool();
     crate::ops::plan::clear_slot_pool();
+    crate::ops::shape::clear_shape_pool();
 }
 
 /// A snapshot of this thread's byte-buffer pools.

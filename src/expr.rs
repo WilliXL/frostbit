@@ -167,6 +167,10 @@ impl<'a> FoldPlan<'a> {
             Op::Or => (PlanOp::Union, shape::union_shape(&shapes, &weights)),
             Op::Diff => unreachable!("combine is AND/OR only"),
         };
+        // The children's shapes have been folded into ours; recycle them.
+        for s in shapes.drain(..) {
+            shape::recycle_shape(s);
+        }
         // Auto hole-punch applies when this AND's intersected key set is
         // narrower than some child's: a mask over the surviving keys provably
         // skips dead blocks in the wider branches. Record *that* here (it is a
@@ -197,7 +201,11 @@ impl<'a> FoldPlan<'a> {
             steps.push(Step::Guard { skip: u32::MAX, pop: 1 });
         }
         let (s1, _, d1, _) = splice(rhs, Op::Diff, &mut steps);
-        let shape = shape::diff_shape(&[s0, s1]);
+        let operands = [s0, s1];
+        let shape = shape::diff_shape(&operands);
+        for s in operands {
+            shape::recycle_shape(s);
+        }
         let after = steps.len() + 1;
         steps.push(Step::Combine(2, shape::to_plan(PlanOp::Diff, &shape)));
         patch_guards(&mut steps, after);
@@ -410,6 +418,8 @@ fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (
                 (Op::And, Some(PlanOp::Intersect)) | (Op::Or, Some(PlanOp::Union))
             );
             if flatten {
+                // This child's fold is subsumed by the parent's N-way op; its
+                // plan drops here, returning its slot buffer to the pool.
                 let Some(Step::Combine(k, _)) = fp.steps.pop() else { unreachable!() };
                 // Inlining moves these steps up, so the child's own guards (which
                 // jumped to its now-popped Combine) no longer apply — drop them.
