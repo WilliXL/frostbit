@@ -59,8 +59,8 @@ mod ops;
 /// smallest form (ideal for persistence). Both fold identically — they differ
 /// only in how the result is serialized.
 pub use ops::kernels::{
-    diff as difference_fast, diff_compact as difference_compact, intersect as intersect_fast,
-    intersect_compact, union as union_fast, union_compact,
+    difference_compact, difference_fast, intersect_compact, intersect_fast, union_compact,
+    union_fast,
 };
 
 #[cfg(feature = "roaring")]

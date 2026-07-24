@@ -1,6 +1,6 @@
 //! Union kernel: value equality vs roaring across shapes/encodings.
 
-use frostbit::ops::kernels::union;
+use frostbit::ops::kernels::union_fast as union;
 
 use crate::common::*;
 

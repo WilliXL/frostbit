@@ -18,8 +18,8 @@ use crate::ops::arena::OpArena;
 use crate::ops::cursor::ContainerCursor;
 use crate::ops::keymask::KeyMask;
 use crate::ops::kernels;
-use crate::ops::plan::{Op as PlanOp, Plan};
-use crate::ops::shape::{self, view_shape, Shape};
+use crate::ops::analyze::plan::{Op as PlanOp, Plan};
+use crate::ops::analyze::shape::{self, view_shape, Shape};
 use crate::ops::source::{view_container_count, Inputs};
 use crate::{FrozenBitmap, FrozenBitmapBuilder, FrozenBitmapView};
 

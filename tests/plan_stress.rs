@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use frostbit::format::*;
 use frostbit::ops::cursor::ContainerCursor;
-use frostbit::ops::plan::{fast_container_bytes, plan_diff, plan_intersect, plan_union, Op, Plan};
+use frostbit::ops::analyze::plan::{fast_container_bytes, plan_diff, plan_intersect, plan_union, Op, Plan};
 use frostbit::{FrozenBitmap, FrozenBitmapBuilder, FrozenBitmapView};
 use roaring::RoaringBitmap;
 

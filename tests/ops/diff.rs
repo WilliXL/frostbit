@@ -1,6 +1,6 @@
 //! Difference kernel (`inputs[0]` minus the rest): value equality vs roaring.
 
-use frostbit::ops::kernels::diff;
+use frostbit::ops::kernels::difference_fast as diff;
 
 use crate::common::*;
 

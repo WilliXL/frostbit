@@ -18,7 +18,7 @@ use crate::bitmap::{aligned_buf, result_buf, AlignedBuf, FrozenBitmap};
 use crate::container::Data;
 use crate::format::*;
 use crate::ops::cursor::ContainerRef;
-use crate::ops::plan::Plan;
+use crate::ops::analyze::plan::Plan;
 
 struct OutEntry {
     key: u16,

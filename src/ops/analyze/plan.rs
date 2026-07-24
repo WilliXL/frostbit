@@ -8,7 +8,7 @@
 
 use crate::format::*;
 use crate::ops::cursor::{ContainerCursor, FoldScratch};
-use crate::ops::decide;
+use crate::ops::analyze::decide;
 use crate::ops::source::Inputs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

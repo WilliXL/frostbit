@@ -9,8 +9,8 @@
 
 use crate::format::*;
 use crate::ops::cursor::ContainerCursor;
-use crate::ops::decide;
-use crate::ops::plan::{wants_partner_major, Op, Plan, SlotPlan, SCRATCH_BYTES};
+use crate::ops::analyze::decide;
+use crate::ops::analyze::plan::{wants_partner_major, Op, Plan, SlotPlan, SCRATCH_BYTES};
 use crate::FrozenBitmapView;
 
 /// One output container's analysis: arena slot ceiling + parent-facing bound.

@@ -44,7 +44,7 @@ fn decomp(c: &mut Criterion) {
     for n in [2usize, 4, 8, 16] {
         let fv = sparse.views(n);
         g.bench_function(format!("plan/{n}"), |b| {
-            b.iter(|| black_box(frostbit::ops::plan::plan_diff(&fv)))
+            b.iter(|| black_box(frostbit::ops::analyze::plan::plan_diff(&fv)))
         });
         g.bench_function(format!("fold/{n}"), |b| {
             b.iter(|| black_box(frostbit::ops::kernels::diff_into(&fv)))
@@ -124,11 +124,11 @@ fn decomp(c: &mut Criterion) {
     runs.optimize_roaring();
     let (rv2, rv16) = (runs.views(2), runs.views(16));
     let mut g = c.benchmark_group("decomp_runs");
-    g.bench_function("diff2/plan", |b| b.iter(|| black_box(frostbit::ops::plan::plan_diff(&rv2))));
+    g.bench_function("diff2/plan", |b| b.iter(|| black_box(frostbit::ops::analyze::plan::plan_diff(&rv2))));
     g.bench_function("diff2/into", |b| b.iter(|| black_box(frostbit::ops::kernels::diff_into(&rv2))));
     g.bench_function("diff2/full", |b| b.iter(|| black_box(difference_fast(&rv2))));
     g.bench_function(format!("diff2/{RB}"), |b| b.iter(|| black_box(rb_diff(&runs.rbs[..2]))));
-    g.bench_function("and16/plan", |b| b.iter(|| black_box(frostbit::ops::plan::plan_intersect(&rv16))));
+    g.bench_function("and16/plan", |b| b.iter(|| black_box(frostbit::ops::analyze::plan::plan_intersect(&rv16))));
     g.bench_function("and16/into", |b| b.iter(|| black_box(frostbit::ops::kernels::intersect_into(&rv16))));
     g.bench_function("and16/full", |b| b.iter(|| black_box(intersect_fast(&rv16))));
     g.bench_function(format!("and16/{RB}"), |b| b.iter(|| black_box(rb_and(&runs.rbs[..16]))));

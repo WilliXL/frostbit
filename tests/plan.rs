@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use frostbit::format::*;
 use frostbit::ops::cursor::ContainerCursor;
-use frostbit::ops::plan::{fast_container_bytes, plan_diff, plan_intersect, plan_union, Plan};
+use frostbit::ops::analyze::plan::{fast_container_bytes, plan_diff, plan_intersect, plan_union, Plan};
 use frostbit::{FrozenBitmap, FrozenBitmapBuilder, FrozenBitmapView};
 
 fn build_std(values: &[u32]) -> FrozenBitmap {

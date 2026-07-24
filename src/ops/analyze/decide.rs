@@ -11,7 +11,7 @@
 //! `#[inline]` function over `Copy` stats, so routing through it costs nothing.
 
 use crate::format::*;
-use crate::ops::plan::{union_promotes, union_promotes_interior, UNION_DENSE_CARD};
+use crate::ops::analyze::plan::{union_promotes, union_promotes_interior, UNION_DENSE_CARD};
 
 /// What one output key becomes: the container type the kernel will build, the
 /// arena slot bytes that hold every state the fold passes through, and — for a
