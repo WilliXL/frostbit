@@ -611,6 +611,40 @@ fn hypotheses(c: &mut Criterion) {
     g.bench_function("union_fanin2", |b| {
         b.iter(|| black_box(k::array_union(a0, a1, &mut t1)))
     });
+    // Scalar k-way merge: one pass, k cursors. Trades the 2.25x re-streaming
+    // for losing the 8-lane SIMD width the pairwise path gets.
+    fn union_kway(inputs: &[&[u16]], out: &mut [u16]) -> usize {
+        let mut pos = [0usize; 8];
+        let (k, mut n, mut last) = (inputs.len(), 0usize, u32::MAX);
+        loop {
+            let mut best = u32::MAX;
+            for i in 0..k {
+                if let Some(&v) = inputs[i].get(pos[i]) {
+                    let v = v as u32;
+                    if v < best {
+                        best = v;
+                    }
+                }
+            }
+            if best == u32::MAX {
+                return n;
+            }
+            for i in 0..k {
+                if inputs[i].get(pos[i]).map(|&v| v as u32) == Some(best) {
+                    pos[i] += 1;
+                }
+            }
+            if best != last {
+                out[n] = best as u16;
+                n += 1;
+                last = best;
+            }
+        }
+    }
+    let four: [&[u16]; 4] = [a0, a1, a2, a3];
+    g.bench_function("union_fanin4_kway_scalar", |b| {
+        b.iter(|| black_box(union_kway(&four, &mut t1)))
+    });
     g.bench_function("union_fanin4_pairwise", |b| {
         b.iter(|| {
             let n = k::array_union(a0, a1, &mut t1);
