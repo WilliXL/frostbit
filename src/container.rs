@@ -50,7 +50,9 @@ impl<'a> Data<'a> {
                 Data::Run(bytemuck::cast_slice(&bytes[2..2 + nr * 4]))
             }
             CT_INLINE => Data::Inline(bytemuck::cast_slice(&bytes[..card as usize * 4])),
-            _ => Data::Array(&[]),
+            // The 2-bit type covers exactly these four; corrupt bytes are
+            // rejected by `from_bytes` before any kernel builds a `Data`.
+            _ => unreachable!("invalid container type {typ}"),
         }
     }
 

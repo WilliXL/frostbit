@@ -291,7 +291,7 @@ impl<'a> FrozenBitmapView<'a> {
             CT_ARRAY => read_u16(self.bytes, start),
             CT_RUN => read_u16(self.bytes, start + 2),
             CT_BITMAP => self.bitmap_first(start),
-            _ => 0,
+            _ => unreachable!("invalid container type {}", e.typ),
         }
     }
 
@@ -305,7 +305,7 @@ impl<'a> FrozenBitmapView<'a> {
                 read_u16(self.bytes, off) + read_u16(self.bytes, off + 2)
             }
             CT_BITMAP => self.bitmap_last(start),
-            _ => 0,
+            _ => unreachable!("invalid container type {}", e.typ),
         }
     }
 

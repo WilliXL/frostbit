@@ -33,7 +33,7 @@ impl<'a> ContainerRef<'a> {
             CT_BITMAP => BITMAP_BYTES,
             CT_RUN => self.data.len(),
             CT_INLINE => self.card as usize * 2,
-            _ => 0,
+            _ => unreachable!("invalid container type {}", self.typ),
         }
     }
 
@@ -144,7 +144,7 @@ impl<'a> ContainerCursor<'a> {
                     CT_ARRAY => e.cardinality as usize * 2,
                     CT_BITMAP => BITMAP_BYTES,
                     CT_RUN => 2 + read_u16(bytes, start) as usize * 4,
-                    _ => 0,
+                    _ => unreachable!("invalid standard container type {}", e.typ),
                 };
                 ContainerRef { key: e.key, typ: e.typ, card: e.cardinality, data: &bytes[start..start + size] }
             }
