@@ -46,7 +46,7 @@ mod slot_pool {
     use crate::pool::Pool;
 
     thread_local! {
-        static POOL: Pool<Vec<SlotPlan>> = const { Pool::cache("slot-plan") };
+        static POOL: Pool<Vec<SlotPlan>> = const { Pool::new("slot-plan") };
     }
 
     pub(super) fn take() -> Vec<SlotPlan> {
@@ -65,19 +65,11 @@ mod slot_pool {
 
 pub(crate) use slot_pool::clear as clear_slot_pool;
 
-/// A slot buffer from the per-thread pool, for a plan built outside this module.
+/// Return a one-shot plan's slot buffer to the per-thread pool. Tree plans
+/// live inside a `FoldPlan` and simply never call this.
 #[inline]
-pub(crate) fn take_slots() -> Vec<SlotPlan> {
-    slot_pool::take()
-}
-
-impl Drop for Plan {
-    /// Hand the slot buffer back to the per-thread pool. Plans are created per
-    /// op *and* per tree node, so recycling on drop — rather than at hand-picked
-    /// call sites — is what keeps repeated analysis from reallocating.
-    fn drop(&mut self) {
-        slot_pool::put(std::mem::take(&mut self.slots));
-    }
+pub(crate) fn recycle(plan: Plan) {
+    slot_pool::put(plan.slots);
 }
 
 /// Capacity-analysis-free plan for tiny inputs: slots = input `seed`'s keys,

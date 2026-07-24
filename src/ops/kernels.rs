@@ -46,6 +46,7 @@ fn intersect_arena(views: &[FrozenBitmapView<'_>]) -> OpArena {
         if trivial(views, seed) {
             let plan = plan_trivial(Op::Intersect, views, seed);
             let mut arena = OpArena::from_plan(&plan);
+            crate::ops::plan::recycle(plan);
             intersect_fold(&mut arena, views);
             return arena;
         }
@@ -58,6 +59,7 @@ fn intersect_arena(views: &[FrozenBitmapView<'_>]) -> OpArena {
 pub fn intersect_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
     let plan = plan_intersect(inputs);
     let mut arena = OpArena::from_plan(&plan);
+    crate::ops::plan::recycle(plan);
     intersect_fold(&mut arena, inputs);
     arena
 }
@@ -200,6 +202,7 @@ pub fn union_compact(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
 pub fn union_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
     let plan = plan_union(inputs);
     let mut arena = OpArena::from_plan(&plan);
+    crate::ops::plan::recycle(plan);
     union_fold(&mut arena, inputs);
     arena
 }
@@ -390,7 +393,8 @@ fn diff_arena(views: &[FrozenBitmapView<'_>]) -> OpArena {
     if !views.is_empty() && trivial(views, 0) {
         let plan = plan_trivial(Op::Diff, views, 0);
         let mut arena = OpArena::from_plan(&plan);
-            diff_fold(&mut arena, views);
+        crate::ops::plan::recycle(plan);
+        diff_fold(&mut arena, views);
         return arena;
     }
     diff_into(views)
@@ -400,6 +404,7 @@ fn diff_arena(views: &[FrozenBitmapView<'_>]) -> OpArena {
 pub fn diff_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
     let plan = plan_diff(inputs);
     let mut arena = OpArena::from_plan(&plan);
+    crate::ops::plan::recycle(plan);
     diff_fold(&mut arena, inputs);
     arena
 }
