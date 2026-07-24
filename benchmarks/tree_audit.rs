@@ -8,10 +8,10 @@
 
 use std::time::Instant;
 
-#[path = "common.rs"]
+#[path = "support/common.rs"]
 mod common;
 use common::*;
-#[path = "treegen.rs"]
+#[path = "support/treegen.rs"]
 mod treegen;
 use treegen::*;
 

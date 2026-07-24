@@ -41,6 +41,12 @@ harness = false
 required-features = ["roaring"]
 
 [[bench]]
+name = "micro"
+path = "benchmarks/micro.rs"
+harness = false
+required-features = ["roaring"]
+
+[[bench]]
 name = "trees"
 path = "benchmarks/trees.rs"
 harness = false

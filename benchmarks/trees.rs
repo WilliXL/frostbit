@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-#[path = "common.rs"]
+#[path = "support/common.rs"]
 mod common;
 use common::*;
-#[path = "treegen.rs"]
+#[path = "support/treegen.rs"]
 mod treegen;
 use treegen::*;
 
