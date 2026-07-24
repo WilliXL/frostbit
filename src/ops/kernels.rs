@@ -1,6 +1,6 @@
 //! Fold kernels. Each writes only into pre-sized arena slots (the arena's
 //! `record` debug-asserts the no-runtime-allocation invariant) and dispatches
-//! on the typed [`Data`] view, delegating the heavy lifting to [`super::simd`].
+//! on the typed [`Data`] view, delegating the heavy lifting to [`crate::simd`].
 
 use crate::container::{as_bitmap_mut, Bitmap, Data, Run};
 use crate::format::*;
@@ -8,7 +8,8 @@ use crate::ops::arena::{OpArena, SlotState};
 use crate::ops::cursor::{ContainerRef, FoldScratch};
 use crate::ops::plan::{plan_diff, plan_intersect, plan_trivial, plan_union, Op};
 use crate::ops::source::Inputs;
-use crate::ops::{run, simd};
+use crate::ops::run;
+use crate::simd;
 use crate::{FrozenBitmap, FrozenBitmapView};
 
 // --- intersection -----------------------------------------------------------

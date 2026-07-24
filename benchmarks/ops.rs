@@ -69,16 +69,16 @@ fn decomp(c: &mut Criterion) {
     let mut out = vec![0u16; 4096];
     let mut k = c.benchmark_group("kernel");
     k.bench_function("diff/800x800", |bch| {
-        bch.iter(|| black_box(frostbit::ops::simd::array_diff(&a800, &b800, &mut out)))
+        bch.iter(|| black_box(frostbit::simd::array_diff(&a800, &b800, &mut out)))
     });
     k.bench_function("diff/660x800", |bch| {
-        bch.iter(|| black_box(frostbit::ops::simd::array_diff(&a660, &b800, &mut out)))
+        bch.iter(|| black_box(frostbit::simd::array_diff(&a660, &b800, &mut out)))
     });
     k.bench_function("intersect/800x800", |bch| {
-        bch.iter(|| black_box(frostbit::ops::simd::array_intersect(&a800, &b800, &mut out)))
+        bch.iter(|| black_box(frostbit::simd::array_intersect(&a800, &b800, &mut out)))
     });
     k.bench_function("union/800x800", |bch| {
-        bch.iter(|| black_box(frostbit::ops::simd::array_union(&a800, &b800, &mut out)))
+        bch.iter(|| black_box(frostbit::simd::array_union(&a800, &b800, &mut out)))
     });
 
     // Same 16-way fold, but a single key (~26 KB working set, L1-resident):
@@ -191,7 +191,7 @@ fn decomp(c: &mut Criterion) {
 #[cfg(feature = "internals")]
 fn membw(c: &mut Criterion) {
     use frostbit::container::{as_bitmap, as_bitmap_mut, Data};
-    use frostbit::ops::simd as k;
+    use frostbit::simd as k;
 
     let mut st = 0xBEEF_CAFE_u64;
     let mk_bitmap = |card: usize, st: &mut u64| -> Vec<u8> {
@@ -357,7 +357,7 @@ fn decomp(_c: &mut Criterion) {}
 // intersect/diff hit rate (emit-loop density). Deltas isolate branch stalls.
 #[cfg(feature = "internals")]
 fn branches(c: &mut Criterion) {
-    use frostbit::ops::simd as k;
+    use frostbit::simd as k;
     const N: usize = 4096;
     let mut st = 0xB4A2_C4E5_u64;
 

@@ -40,6 +40,13 @@ pub use view::{FrozenBitmapView, Iter};
 mod expr;
 pub use expr::BitmapExpr;
 
+/// SIMD container kernels. Public only under `internals`, for white-box
+/// kernel benchmarks.
+#[cfg(feature = "internals")]
+pub mod simd;
+#[cfg(not(feature = "internals"))]
+mod simd;
+
 /// Set ops + their static analysis pass. The module is public only under
 /// `internals`; the stable entry points are re-exported below.
 #[cfg(feature = "internals")]
