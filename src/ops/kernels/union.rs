@@ -1,15 +1,15 @@
 //! N-way union (OR).
 
-use crate::api::container::{Data, Run};
+use crate::container::{Data, Run};
 use crate::format::*;
 use crate::ops::arena::{OpArena, SlotState};
 use crate::ops::cursor::ContainerRef;
 use crate::ops::analyze::plan::plan_union;
 use crate::ops::source::Inputs;
-use crate::ops::run;
+use crate::ops::kernels::run;
 use crate::ops::simd;
 use crate::{FrozenBitmap, FrozenBitmapView};
-use super::common::*;
+use super::accum::*;
 
 // --- union ------------------------------------------------------------------
 

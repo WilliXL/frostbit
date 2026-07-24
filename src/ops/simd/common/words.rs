@@ -2,8 +2,8 @@
 //! and extract set bits back to an array. These are scalar word operations that
 //! autovectorize where it matters; they have no per-arch dispatch.
 
-use crate::api::container::Bitmap;
-use crate::api::container::Run;
+use crate::container::Bitmap;
+use crate::container::Run;
 
 #[inline]
 pub fn copy(dst: &mut Bitmap, src: &Bitmap) {

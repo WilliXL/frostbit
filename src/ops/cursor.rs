@@ -2,7 +2,7 @@
 //! (standard or inline) or a working arena. Shared by the analysis pass and the
 //! op kernels; mirrors the monorepo `ContainerIter`.
 
-use crate::api::container::Data;
+use crate::container::Data;
 use crate::format::*;
 use crate::ops::arena::OpArena;
 use crate::ops::keymask::KeyMask;

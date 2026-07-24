@@ -1,6 +1,6 @@
 //! NEON word-fold skeletons shared by the whole-bitmap kernels.
 
-use crate::api::container::Bitmap;
+use crate::container::Bitmap;
 use crate::format::BITMAP_WORDS;
 
 // --- shared aarch64 NEON word loops -----------------------------------------

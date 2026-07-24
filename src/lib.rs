@@ -20,6 +20,13 @@ pub mod format;
 #[cfg(not(feature = "internals"))]
 mod format;
 
+/// Typed, zero-copy views of a container payload — the model `format`'s bytes
+/// decode into. Public only under `internals`.
+#[cfg(feature = "internals")]
+pub mod container;
+#[cfg(not(feature = "internals"))]
+mod container;
+
 mod api;
 
 pub use api::bitmap::FrozenBitmap;
@@ -30,9 +37,6 @@ pub use api::view::{FrozenBitmapView, Iter};
 /// Working-memory budgeting, pre-allocation, and overflow policy.
 pub use api::pool;
 
-/// Container payload access. Public only under `internals`.
-#[cfg(feature = "internals")]
-pub use api::container;
 
 /// Set ops + their static analysis pass. The module is public only under
 /// `internals`; the stable entry points are re-exported below.

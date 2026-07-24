@@ -4,7 +4,7 @@
 //! is already optimal in a loop; only AVX-512 VPOPCNTDQ beats it. aarch64 has
 //! no scalar popcount, so it uses the NEON `CNT` with a widening reduction.
 
-use crate::api::container::Bitmap;
+use crate::container::Bitmap;
 use crate::format::BITMAP_WORDS;
 
 #[inline]

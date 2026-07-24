@@ -1,6 +1,6 @@
 //! Bitmap intersection: `dst &= src`, plus a fused-popcount variant.
 
-use crate::api::container::Bitmap;
+use crate::container::Bitmap;
 #[cfg(target_arch = "x86_64")]
 use crate::format::BITMAP_WORDS;
 

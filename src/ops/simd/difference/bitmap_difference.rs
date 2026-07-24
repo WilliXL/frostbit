@@ -3,7 +3,7 @@
 //! The hardware "andnot" computes `!a & b`, so to get `dst & !src` the loops
 //! pass `(src, dst)`. NEON's `BIC` is `a & !b`, so it takes `(dst, src)`.
 
-use crate::api::container::Bitmap;
+use crate::container::Bitmap;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use crate::format::BITMAP_WORDS;
 

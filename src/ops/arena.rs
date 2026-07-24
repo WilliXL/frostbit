@@ -15,7 +15,7 @@
 //! their result.
 
 use crate::api::bitmap::{aligned_buf, result_buf, AlignedBuf, FrozenBitmap};
-use crate::api::container::Data;
+use crate::container::Data;
 use crate::format::*;
 use crate::ops::cursor::ContainerRef;
 use crate::ops::analyze::plan::Plan;
