@@ -67,7 +67,7 @@ impl FrozenBitmapBuilder {
         }
     }
 
-    /// Finish as the smallest encoding: inline (FRI) when it beats the
+    /// Finish as the smallest encoding: inline (FI) when it beats the
     /// standard layout, else standard. Frozen bitmaps are built for storage,
     /// so the builder always finishes compact.
     pub fn finish(mut self) -> FrozenBitmap {
@@ -226,7 +226,7 @@ fn serialize_standard(containers: &[Built], total_card: u64) -> FrozenBitmap {
 }
 
 /// Re-expand built containers into packed u32s ("FI" + u16 count + values).
-/// Only reached when FRI won the size comparison, i.e. tiny per-key counts.
+/// Only reached when FI won the size comparison, i.e. tiny per-key counts.
 fn serialize_inline(containers: &[Built], count: usize) -> FrozenBitmap {
     let total = inline_size(count);
     let mut buf = result_buf(total);

@@ -3,8 +3,8 @@
 //! A container's bytes are reinterpreted as the natural typed slice for its
 //! kind — `&[u16]`, `&[u64; 1024]`, `&[Run]`, or `&[u32]` — via `bytemuck`,
 //! relying on the alignment the wire format guarantees (arrays 2-byte, bitmaps
-//! 64-byte, runs 2-byte, inline 4-byte). Kernels match on [`Data`] instead of
-//! decoding bytes by hand.
+//! 64-byte, runs 2-byte, inline 4-byte). Kernels match on the `Data` enum below
+//! instead of decoding bytes by hand.
 
 use bytemuck::{Pod, Zeroable};
 

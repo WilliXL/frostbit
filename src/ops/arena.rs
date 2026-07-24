@@ -11,8 +11,8 @@
 //! input leaf sequentially.
 //!
 //! The working buffer and index vectors are reused across ops via a small
-//! thread-local pool (see [`pool`]), so steady-state `intersect`/`union`/`diff`
-//! allocate only their result.
+//! thread-local `pool`, so steady-state `intersect`/`union`/`diff` allocate only
+//! their result.
 
 use crate::bitmap::{aligned_buf, result_buf, AlignedBuf, FrozenBitmap};
 use crate::container::Data;

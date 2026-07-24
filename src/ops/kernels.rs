@@ -14,7 +14,7 @@ use crate::{FrozenBitmap, FrozenBitmapView};
 // --- intersection -----------------------------------------------------------
 
 /// Tiny-input one-shot gate: below this, the capacity walk dominates the fold
-/// (run cells carry ~18-byte payloads), so ∧/\ skip it via [`plan_trivial`].
+/// (run cells carry ~18-byte payloads), so ∧/∖ skip it via [`plan_trivial`].
 /// The count cap bounds the trivial arena (`keys × B`).
 const TRIVIAL_MAX_BYTES: usize = 16 << 10;
 const TRIVIAL_MAX_KEYS: usize = 32;
@@ -379,7 +379,6 @@ pub fn diff_into<I: Inputs + ?Sized>(inputs: &I) -> OpArena {
     arena
 }
 
-/// Fold `inputs` (DIFF: `inputs[0]` minus the rest) into a pre-sized `arena`.
 /// Fold `inputs` (DIFF: `inputs[0]` minus the rest) into a pre-sized `arena`.
 ///
 /// Partner-major: pass 1 walks the lhs fused with the first subtrahend
@@ -1136,12 +1135,11 @@ fn retain_runs(acc: &mut [u16], card: u32, runs: &[Run], keep_inside: bool) -> u
     w as u32
 }
 
-/// Keep `acc[..card]` values where `keep` holds, compacting in place.
+/// Keep `acc[..card]` values by bitmap membership (`keep_inside` selects in- vs
+/// out-of-set), compacting in place. The word array is hoisted out of the loop
+/// and compaction is branchless (~1 ns/value) — versus a per-probe container-enum
+/// re-match (~3 ns) — since this is the hot path for a bitmap-partner array fold.
 #[inline]
-/// Filter sorted `acc` by bitmap membership with the word array hoisted out of
-/// the loop. Going through `Data::contains` re-matches the container enum on
-/// every probe (~3ns each — the corpus audit's whole offender population);
-/// this tight loop with branchless compaction runs at ~1ns.
 fn retain_bitmap(acc: &mut [u16], card: u32, b: &Bitmap, keep_inside: bool) -> u32 {
     let mut w = 0usize;
     for r in 0..card as usize {

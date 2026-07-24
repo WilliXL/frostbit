@@ -18,9 +18,15 @@ enum Repr {
 }
 
 impl<'a> FrozenBitmapView<'a> {
-    /// Validate and wrap `bytes`. Returns `None` if not a well-formed frozen
-    /// bitmap (bad header, out-of-bounds payload, non-ascending keys/values,
-    /// or inconsistent cardinality).
+    /// Validate and wrap `bytes` for zero-copy reading (borrows, no copy).
+    /// Returns `None` unless the bytes are a fully well-formed frozen bitmap:
+    /// correct magic/version, an 8-byte-aligned base, every container's payload
+    /// in-bounds, container keys and array/inline values strictly ascending,
+    /// runs in range (`start + len ≤ 0xFFFF`), non-overlapping, and `1..=MAX_RUNS`
+    /// in count, and every stored cardinality consistent with its payload (run
+    /// lengths, bitmap popcount) and with the header total. Use
+    /// [`FrozenBitmap::from_bytes`](crate::FrozenBitmap::from_bytes) to accept an
+    /// unaligned source (it copies into an aligned buffer first).
     pub fn from_bytes(bytes: &'a [u8]) -> Option<Self> {
         if has_inline_magic(bytes) {
             Self::parse_inline(bytes)

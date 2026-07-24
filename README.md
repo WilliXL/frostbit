@@ -41,8 +41,9 @@ assert_eq!(v.len(), 3);
   automatically whenever the tree's root provably narrows a child
   (`punch_holes()` forces it) — and an empty AND/DIFF subtree
   **short-circuits** the rest of the tree.
-- **SIMD container kernels** (NEON / SSE with scalar fallbacks) plus
-  autovectorized word operations.
+- **SIMD container kernels** (NEON on aarch64; SSE2 / SSSE3 / SSE4.1 / AVX2 /
+  AVX-512 on x86-64, feature-detected; scalar fallbacks) plus autovectorized
+  word operations.
 - **First-class `roaring` interop** behind the default `roaring` feature:
   `FrozenBitmap::from_roaring` / `to_roaring` and `From` conversions.
 
@@ -58,12 +59,12 @@ let mut b = FrozenBitmapBuilder::new();
 b.push(3);
 b.extend_sorted([70_000, 1 << 20]);
 let bm = b.finish();            // picks the smallest encoding (may be inline)
-// or: b.finish_standard()      // always the standard container format
 ```
 
 `finish()` produces the compact form for persistence. With the `roaring`
 feature, `FrozenBitmap::from_roaring(&rb)` / `bm.to_roaring()` (and `From`
-impls) convert to/from `roaring::RoaringBitmap` by container transcoding.
+impls) convert to/from `roaring::RoaringBitmap` by iterating values in
+ascending order.
 
 ### Wire format
 
@@ -73,7 +74,7 @@ Little-endian, two self-identifying encodings (v3):
 standard ("FROZ")                          inline ("FI")
  0  u32  MAGIC "FROZ"                       0  [u8;2] MAGIC "FI"
  4  u16  VERSION (3)                        2  u16    count
- 6  u16  FLAGS (has-runs, full)             4  ..     packed ascending u32s
+ 6  u16  FLAGS (has-runs, full, has-bitmap) 4  ..     packed ascending u32s
  8  u32  NUM_CONTAINERS
 12  u32  CARDINALITY (flag ⇒ 2^32)
 16  ..   container index (SoA, 8 B/container: key, type, cardinality, offset)
@@ -173,7 +174,7 @@ src/
     source.rs    the Inputs abstraction (views, arenas) the kernels fold over
     keymask.rs   hole-punching live-key mask
     run.rs       native run-container ops
-    simd/        NEON / SSE kernels (merge, scan, bitmap words, popcount)
+    simd/        NEON / SSE / AVX kernels (merge, scan, bitmap words, popcount)
 tests/           differential + stress suites (vs roaring oracle)
 benchmarks/      criterion benches vs roaring
 ```
@@ -289,7 +290,6 @@ two run-difference cells inside the noise band.
 ## Features
 
 - `roaring` *(default)* — conversions to/from `roaring::RoaringBitmap`.
-- `tracing` — opt-in trace logs for parse failures.
 - `internals` — exposes internal modules for white-box tests/benchmarks; not a
   stable API.
 

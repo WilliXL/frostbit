@@ -90,7 +90,8 @@ impl FrozenBitmap {
     ///
     /// Any source alignment is accepted: the bytes are copied into the aligned
     /// owned buffer first and that (always op-safe) copy is validated, so unlike
-    /// [`FrozenBitmapView::from_bytes`] there is no base-alignment precondition.
+    /// [`FrozenBitmapView::from_bytes`](crate::FrozenBitmapView::from_bytes)
+    /// there is no base-alignment precondition.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let mut buf = result_buf(bytes.len());
         buf.extend_from_slice(bytes);

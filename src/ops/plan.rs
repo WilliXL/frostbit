@@ -73,7 +73,7 @@ pub(crate) fn recycle(plan: Plan) {
 }
 
 /// Capacity-analysis-free plan for tiny inputs: slots = input `seed`'s keys,
-/// all `B`-clamped. Sound because every ∧/\ fold state fits a bitmap-sized
+/// all `B`-clamped. Sound because every ∧/∖ fold state fits a bitmap-sized
 /// slot (the shrink caps only ever tighten this), and the key set is a
 /// superset of the output's (unclaimed slots serialize to nothing). Not for
 /// ∨, whose per-key clamp doubles as the promotion decision.

@@ -120,7 +120,7 @@ pub fn write_u64(bytes: &mut [u8], off: usize, val: u64) {
     bytes[off..off + 8].copy_from_slice(&val.to_le_bytes());
 }
 
-// --- Inline format (FRI) ----------------------------------------------------
+// --- Inline format (FI) ----------------------------------------------------
 //
 // Whole-bitmap encoding for scattered/small sets: [0..2) magic "FI",
 // [2..4) u16 count, [4..) packed ascending u32 values. Total align8(4 + 4n).
