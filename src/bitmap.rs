@@ -184,12 +184,26 @@ impl<'a> IntoIterator for &'a FrozenBitmap {
 }
 
 impl PartialEq for FrozenBitmap {
+    /// Set equality (same values), with a fast path for byte-identical buffers.
+    /// Two set-equal bitmaps in different encodings (e.g. inline vs standard)
+    /// compare equal.
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.buf[..] == other.buf[..]
+        self.buf[..] == other.buf[..] || self.view() == other.view()
     }
 }
 impl Eq for FrozenBitmap {}
+
+impl std::hash::Hash for FrozenBitmap {
+    /// Hashes the value set, consistent with the set-equality [`PartialEq`].
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let v = self.view();
+        v.len().hash(state);
+        for value in v.iter() {
+            value.hash(state);
+        }
+    }
+}
 
 impl fmt::Debug for FrozenBitmap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

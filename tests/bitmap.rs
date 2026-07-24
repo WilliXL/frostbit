@@ -1,6 +1,6 @@
 //! Owned `FrozenBitmap`: ingest validation, alignment, equality, view access.
 
-use frostbit::{FrozenBitmap, FrozenBitmapBuilder};
+use frostbit::{union_fast, FrozenBitmap, FrozenBitmapBuilder};
 
 fn build(values: &[u32]) -> FrozenBitmap {
     let mut b = FrozenBitmapBuilder::new();
@@ -42,6 +42,29 @@ fn clone_and_eq() {
     let a = build(&[1, 2, 3]);
     assert_eq!(a, a.clone());
     assert_ne!(a, build(&[1, 2, 4]));
+}
+
+#[test]
+fn eq_is_set_equality_across_encodings() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // `{42}` as inline (builder picks the smallest encoding) vs standard (an op
+    // always emits standard form) — same set, different bytes.
+    let inline = build(&[42]);
+    let standard = union_fast(&[inline.view()]);
+    assert_ne!(inline.as_bytes(), standard.as_bytes(), "expected different encodings");
+    assert_eq!(inline, standard, "set-equal bitmaps must compare equal");
+
+    let hash = |b: &FrozenBitmap| {
+        let mut h = DefaultHasher::new();
+        b.hash(&mut h);
+        h.finish()
+    };
+    assert_eq!(hash(&inline), hash(&standard), "Hash must agree with set-equality");
+
+    // Different sets stay unequal.
+    assert_ne!(build(&[42]), build(&[43]));
 }
 
 #[test]

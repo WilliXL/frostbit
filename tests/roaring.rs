@@ -25,9 +25,10 @@ fn assert_roundtrips(rb: &RoaringBitmap) {
 
     let back = fz.to_roaring();
     assert_eq!(&back, rb, "roaring -> frozen -> roaring mismatch");
+    // Byte identity (stronger than the now set-based `PartialEq`): compare bytes.
     assert_eq!(
-        FrozenBitmap::from_roaring(&back),
-        fz,
+        FrozenBitmap::from_roaring(&back).as_bytes(),
+        fz.as_bytes(),
         "frozen -> roaring -> frozen not byte-identical"
     );
 }

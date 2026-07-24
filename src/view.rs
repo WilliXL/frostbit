@@ -454,6 +454,15 @@ impl<'a> IntoIterator for &FrozenBitmapView<'a> {
     }
 }
 
+impl PartialEq for FrozenBitmapView<'_> {
+    /// Set equality: equal iff they hold the same values, regardless of encoding
+    /// (inline vs standard) or backing bytes.
+    fn eq(&self, other: &Self) -> bool {
+        self.cardinality == other.cardinality && self.iter().eq(other.iter())
+    }
+}
+impl Eq for FrozenBitmapView<'_> {}
+
 fn inline_contains(bytes: &[u8], count: usize, value: u32) -> bool {
     let (mut lo, mut hi) = (0usize, count);
     while lo < hi {
