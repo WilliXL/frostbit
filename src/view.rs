@@ -104,7 +104,7 @@ impl<'a> FrozenBitmapView<'a> {
                     if start + 2 > bytes.len() {
                         return None;
                     }
-                    2 + read_u16(bytes, start) as usize * 4
+                    run_bytes(read_u16(bytes, start) as usize)
                 }
                 _ => return None,
             };

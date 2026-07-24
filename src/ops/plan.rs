@@ -8,6 +8,7 @@
 
 use crate::format::*;
 use crate::ops::cursor::{ContainerCursor, FoldScratch};
+use crate::ops::decide;
 use crate::ops::source::Inputs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +39,7 @@ pub struct Plan {
 }
 
 /// Scratch the kernels need: one bitmap accumulator + one run/bitmap temp.
-const SCRATCH_BYTES: usize = 2 * BITMAP_BYTES;
+pub(crate) const SCRATCH_BYTES: usize = 2 * BITMAP_BYTES;
 
 mod slot_pool {
     use super::SlotPlan;
@@ -140,16 +141,13 @@ pub(crate) fn union_promotes_interior(n: usize, sum_card: u32) -> bool {
     n >= 4 && sum_card as usize * (n - 3) > 1000
 }
 
-/// Bytes a result container of `card` values takes in op-ready (`_fast`) form:
-/// an array while it fits, otherwise a bitmap. The capacity contract sizes
-/// every slot to be ≥ this for its result.
+/// Bytes a result container of `card` values takes in op-ready (`_fast`) form.
+/// The capacity contract sizes every slot to be ≥ this for its result, which is
+/// the invariant the arena-sizing stress tests assert — hence `internals`-only.
+#[cfg(feature = "internals")]
 #[inline]
 pub fn fast_container_bytes(card: u32) -> usize {
-    if card as usize <= ARRAY_MAX_SIZE {
-        card as usize * 2
-    } else {
-        BITMAP_BYTES
-    }
+    decide::shrink_cap(card) as usize
 }
 
 /// Partner-major folds pay off while the whole accumulator set stays
@@ -164,16 +162,10 @@ pub(crate) fn wants_partner_major(op: Op, slots: &[SlotPlan]) -> bool {
         && slots.iter().map(|s| s.capacity as usize).sum::<usize>() <= PARTNER_MAJOR_MAX_ACC_BYTES
 }
 
-/// Slot ceiling when a key is seeded from a container of `card` values and can
-/// only shrink (AND/DIFF): array form while it fits, else bitmap.
-#[inline]
-fn shrink_slot_bytes(card: u32) -> u32 {
-    fast_container_bytes(card) as u32
-}
 
 /// AND: output keys = ∩ of all inputs' keys. Per key, the result ⊆ the
 /// smallest-card input there, so execution seeds from it (expanding run/bitmap
-/// → array when card ≤ 4096) and only shrinks. cap = `shrink_slot_bytes(min_card)`.
+/// → array when card ≤ 4096) and only shrinks. cap = `decide::shrink_cap(min_card)`.
 ///
 /// Two walks, picked by key-set shape: when some input is narrower (or n = 2),
 /// drive by the fewest-container input and `advance_to` the rest — O(K_seed·n)
@@ -209,7 +201,7 @@ pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
                 hit
             });
             if present {
-                slots.push(SlotPlan { key, capacity: shrink_slot_bytes(min_card) });
+                slots.push(SlotPlan { key, capacity: decide::shrink_cap(min_card) });
             }
         }
     } else {
@@ -225,7 +217,7 @@ pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
                 }
             }
             if present == inputs.len() {
-                slots.push(SlotPlan { key, capacity: shrink_slot_bytes(min_card) });
+                slots.push(SlotPlan { key, capacity: decide::shrink_cap(min_card) });
             }
         }
     }
@@ -250,6 +242,7 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
         let mut sum_card = 0u32;
         let mut total_runs = 0usize;
         let mut any_bitmap = false;
+        let mut all_run = true;
         let mut max_single = 0usize;
         let mut n_present = 0usize;
         for c in cursors.iter_mut() {
@@ -258,22 +251,24 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
                 sum_card = sum_card.saturating_add(cr.card);
                 total_runs += cr.num_runs();
                 any_bitmap |= cr.typ == CT_BITMAP;
+                all_run &= cr.typ == CT_RUN;
                 max_single = max_single.max(cr.stored_bytes());
                 n_present += 1;
                 c.advance();
             }
         }
-        let needs_bitmap = any_bitmap
-            || sum_card > UNION_DENSE_CARD
-            || total_runs > MAX_RUNS
-            || union_promotes(n_present, sum_card);
-        let capacity = if needs_bitmap {
-            BITMAP_BYTES
-        } else {
-            (sum_card as usize * 2)
-                .max(2 + total_runs * 4)
-                .max(max_single)
-        } as u32;
+        let capacity = decide::union_key(
+            &decide::UnionKey {
+                sum_card,
+                total_runs,
+                any_bitmap,
+                all_run,
+                max_single: max_single as u32,
+                n: n_present,
+            },
+            decide::Fanin::Flat,
+        )
+        .cap;
         slots.push(SlotPlan { key, capacity });
     }
     Plan { op: Op::Union, double: wants_partner_major(Op::Union, &slots), slots, scratch_bytes: SCRATCH_BYTES }
@@ -282,7 +277,7 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
 /// DIFF: `inputs[0]` (A) minus the rest. Output keys = A's keys (the RHS can
 /// only remove values within a key, never add a block). A key absent from every
 /// RHS is copied verbatim (cap = its stored bytes); a key present in some RHS
-/// can only shrink from A (cap = `shrink_slot_bytes(A_card)`).
+/// can only shrink from A (cap = `decide::shrink_cap(A_card)`).
 pub fn plan_diff<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = slot_pool::take();
     if inputs.is_empty() {
@@ -296,11 +291,7 @@ pub fn plan_diff<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     while let Some(key) = a.peek_key() {
         let cr = a.get();
         let in_rhs = rhs.iter_mut().any(|c| c.advance_to(key));
-        let capacity = if in_rhs {
-            shrink_slot_bytes(cr.card)
-        } else {
-            cr.stored_bytes() as u32
-        };
+        let capacity = decide::diff_cap(cr.card, cr.stored_bytes() as u32, in_rhs);
         slots.push(SlotPlan { key, capacity });
         a.advance();
     }

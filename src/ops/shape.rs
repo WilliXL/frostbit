@@ -9,7 +9,8 @@
 
 use crate::format::*;
 use crate::ops::cursor::ContainerCursor;
-use crate::ops::plan::{union_promotes_interior, wants_partner_major, Op, Plan, SlotPlan, UNION_DENSE_CARD};
+use crate::ops::decide;
+use crate::ops::plan::{wants_partner_major, Op, Plan, SlotPlan, SCRATCH_BYTES};
 use crate::FrozenBitmapView;
 
 /// One output container's analysis: arena slot ceiling + parent-facing bound.
@@ -28,7 +29,7 @@ impl Meta {
     fn stored(&self) -> u32 {
         match self.typ {
             CT_BITMAP => BITMAP_BYTES as u32,
-            CT_RUN => 2 + self.runs as u32 * 4,
+            CT_RUN => run_bytes(self.runs as usize) as u32,
             _ => self.card * 2,
         }
     }
@@ -56,22 +57,11 @@ pub fn view_shape(view: &FrozenBitmapView<'_>) -> Shape {
     out
 }
 
-/// Slot ceiling for an AND/DIFF output seeded from `card` values (array while it
-/// fits, else bitmap) — matches `plan`'s `shrink_slot_bytes`.
-#[inline]
-fn shrink(card: u32) -> u32 {
-    if card as usize <= ARRAY_MAX_SIZE {
-        card * 2
-    } else {
-        BITMAP_BYTES as u32
-    }
-}
-
 /// Derive the arena [`Plan`] from an output shape.
 pub fn to_plan(op: Op, shape: &Shape) -> Plan {
     let slots: Vec<SlotPlan> =
         shape.iter().map(|m| SlotPlan { key: m.key, capacity: m.cap }).collect();
-    Plan { op, double: wants_partner_major(op, &slots), slots, scratch_bytes: 2 * BITMAP_BYTES }
+    Plan { op, double: wants_partner_major(op, &slots), slots, scratch_bytes: SCRATCH_BYTES }
 }
 
 /// A merge cursor over a shape.
@@ -113,14 +103,8 @@ pub fn intersect_shape(inputs: &[Shape]) -> Shape {
             }
         }
         if present == inputs.len() {
-            let (typ, runs) = if min_card as usize <= ARRAY_MAX_SIZE {
-                (CT_ARRAY, 0)
-            } else if all_run && runs <= MAX_RUNS {
-                (CT_RUN, runs as u16)
-            } else {
-                (CT_BITMAP, 0)
-            };
-            out.push(Meta { key, cap: shrink(min_card), card: min_card, runs, typ });
+            let c = decide::intersect_key(min_card, all_run, runs);
+            out.push(Meta { key, cap: c.cap, card: min_card, runs: c.runs, typ: c.typ });
         }
     }
     out
@@ -148,16 +132,18 @@ pub fn union_shape(inputs: &[Shape], weights: &[usize]) -> Shape {
                 n += w;
             }
         }
-        let needs_bitmap =
-            any_bitmap || sum > UNION_DENSE_CARD || runs > MAX_RUNS || union_promotes_interior(n, sum);
-        let (cap, typ, oruns) = if needs_bitmap && all_run && n > 0 && runs <= MAX_RUNS {
-            (BITMAP_BYTES as u32, CT_RUN, runs as u16)
-        } else if needs_bitmap {
-            (BITMAP_BYTES as u32, CT_BITMAP, 0)
-        } else {
-            ((sum * 2).max(2 + runs as u32 * 4).max(max_single), CT_ARRAY, 0)
-        };
-        out.push(Meta { key, cap, card: sum, runs: oruns, typ });
+        let c = decide::union_key(
+            &decide::UnionKey {
+                sum_card: sum,
+                total_runs: runs,
+                any_bitmap,
+                all_run,
+                max_single,
+                n,
+            },
+            decide::Fanin::Interior,
+        );
+        out.push(Meta { key, cap: c.cap, card: sum, runs: c.runs, typ: c.typ });
     }
     out
 }
@@ -184,27 +170,9 @@ pub fn diff_shape(inputs: &[Shape]) -> Shape {
                 }
             }
         }
-        // The rhs *shape* over-approximates its keys, so even an `in_rhs` key may
-        // be absent in the rhs *arena* at runtime — in which case `diff_key`
-        // copies the lhs verbatim. The slot must hold whichever the kernel does:
-        // the verbatim lhs, or the in-rhs (shrunk / split) result. Mirror
-        // diff_key's type choice for the in-rhs result.
-        let verbatim = l.stored();
-        let (irc, irtyp, irruns) = if !in_rhs {
-            (verbatim, l.typ, l.runs)
-        } else if l.typ == CT_RUN && l.card as usize > ARRAY_MAX_SIZE && all_split && bound <= MAX_RUNS {
-            (shrink(l.card), CT_RUN, bound as u16)
-        } else if l.card as usize <= ARRAY_MAX_SIZE {
-            (shrink(l.card), CT_ARRAY, 0)
-        } else {
-            (BITMAP_BYTES as u32, CT_BITMAP, 0)
-        };
-        let m = if verbatim >= irc {
-            Meta { key: l.key, cap: verbatim, card: l.card, runs: l.runs, typ: l.typ }
-        } else {
-            Meta { key: l.key, cap: irc, card: l.card, runs: irruns, typ: irtyp }
-        };
-        out.push(m);
+        let lhs = decide::DiffLhs { card: l.card, typ: l.typ, runs: l.runs, stored: l.stored() };
+        let c = decide::diff_key_shape(&lhs, in_rhs, all_split, bound);
+        out.push(Meta { key: l.key, cap: c.cap, card: l.card, runs: c.runs, typ: c.typ });
     }
     out
 }

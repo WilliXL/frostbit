@@ -143,7 +143,7 @@ impl<'a> ContainerCursor<'a> {
                 let size = match e.typ {
                     CT_ARRAY => e.cardinality as usize * 2,
                     CT_BITMAP => BITMAP_BYTES,
-                    CT_RUN => 2 + read_u16(bytes, start) as usize * 4,
+                    CT_RUN => run_bytes(read_u16(bytes, start) as usize),
                     _ => unreachable!("invalid standard container type {}", e.typ),
                 };
                 ContainerRef { key: e.key, typ: e.typ, card: e.cardinality, data: &bytes[start..start + size] }

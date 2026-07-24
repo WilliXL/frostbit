@@ -47,7 +47,7 @@ impl<'a> Data<'a> {
             CT_BITMAP => Data::Bitmap(as_bitmap(&bytes[..BITMAP_BYTES])),
             CT_RUN => {
                 let nr = read_u16(bytes, 0) as usize;
-                Data::Run(bytemuck::cast_slice(&bytes[2..2 + nr * 4]))
+                Data::Run(bytemuck::cast_slice(&bytes[2..run_bytes(nr)]))
             }
             CT_INLINE => Data::Inline(bytemuck::cast_slice(&bytes[..card as usize * 4])),
             // The 2-bit type covers exactly these four; corrupt bytes are

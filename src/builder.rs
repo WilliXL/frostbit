@@ -117,7 +117,7 @@ fn build_container(key: u16, vals: &[u16]) -> Built {
     let runs = extract_runs(vals);
 
     let array_cost = vals.len() * 2;
-    let run_cost = 2 + runs.len() * 4;
+    let run_cost = run_bytes(runs.len());
     let bitmap_cost = BITMAP_BYTES;
 
     let (typ, payload) = if run_cost <= array_cost && run_cost <= bitmap_cost {

@@ -3,6 +3,7 @@
 
 pub mod arena;
 pub mod cursor;
+mod decide;
 pub mod keymask;
 pub mod kernels;
 pub mod plan;

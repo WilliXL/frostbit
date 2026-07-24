@@ -311,7 +311,7 @@ fn union_apply(arena: &mut OpArena, s: usize, p: &ContainerRef<'_>, is_last: boo
             }
             let (cur, other) = arena.slot_pair(s);
             let src = slot_runs(cur, st.runs);
-            let dst: &mut [Run] = bytemuck::cast_slice_mut(&mut other[2..2 + bound * 4]);
+            let dst: &mut [Run] = bytemuck::cast_slice_mut(&mut other[2..run_bytes(bound)]);
             let (nr, card) = run::union(src, as_runs(p), dst);
             write_u16(other, 0, nr as u16);
             arena.flip_side(s);
@@ -340,7 +340,7 @@ fn union_finalize(arena: &mut OpArena) {
         let key = arena.planned_key(s);
         match st.typ {
             CT_ARRAY => arena.record(key, CT_ARRAY, st.card, s, st.card as usize * 2),
-            CT_RUN => arena.record(key, CT_RUN, st.card, s, 2 + st.runs as usize * 4),
+            CT_RUN => arena.record(key, CT_RUN, st.card, s, run_bytes(st.runs as usize)),
             _ => {
                 let card = if st.card == SlotState::CARD_LAZY {
                     simd::popcount(acc(arena.slot_mut(s)))
@@ -532,7 +532,7 @@ fn set_state(arena: &mut OpArena, i: usize, typ: u8, runs: u16, card: u32) {
 /// Runs held in a slot, in wire layout (`u16` count + `(start, len)` pairs).
 #[inline]
 fn slot_runs(slot: &[u8], nr: u16) -> &[Run] {
-    bytemuck::cast_slice(&slot[2..2 + nr as usize * 4])
+    bytemuck::cast_slice(&slot[2..run_bytes(nr as usize)])
 }
 
 /// Subtract one partner container from slot `i`'s accumulator.
@@ -593,7 +593,7 @@ fn diff_apply(arena: &mut OpArena, i: usize, p: &ContainerRef<'_>, is_last: bool
             let bound = st.runs as usize + extra;
             let (cur, other) = arena.slot_pair(i);
             let src = slot_runs(cur, st.runs);
-            let dst: &mut [Run] = bytemuck::cast_slice_mut(&mut other[2..2 + bound * 4]);
+            let dst: &mut [Run] = bytemuck::cast_slice_mut(&mut other[2..run_bytes(bound)]);
             let (nr, card) = match p.typed() {
                 Data::Run(rr) => run::diff(src, rr, dst),
                 Data::Array(ra) => run::diff_array(src, ra, dst),
@@ -626,7 +626,7 @@ fn diff_finalize(arena: &mut OpArena) {
         let key = arena.planned_key(i);
         match st.typ {
             CT_ARRAY => arena.record(key, CT_ARRAY, st.card, i, st.card as usize * 2),
-            CT_RUN => arena.record(key, CT_RUN, st.card, i, 2 + st.runs as usize * 4),
+            CT_RUN => arena.record(key, CT_RUN, st.card, i, run_bytes(st.runs as usize)),
             _ => {
                 let card = if st.card == SlotState::CARD_LAZY {
                     simd::popcount(acc(arena.slot_mut(i)))
@@ -879,8 +879,8 @@ fn run_fold_diff(
 
     let cur: &[u8] = if in_b { b } else { a };
     write_u16(slot, 0, nr as u16);
-    slot[2..2 + nr * 4].copy_from_slice(&cur[..nr * 4]);
-    (card, 2 + nr * 4)
+    slot[2..run_bytes(nr)].copy_from_slice(&cur[..nr * 4]);
+    (card, run_bytes(nr))
 }
 
 
@@ -940,8 +940,8 @@ fn run_fold(
 
     let cur: &[u8] = if in_b { b } else { a };
     write_u16(slot, 0, nr as u16);
-    slot[2..2 + nr * 4].copy_from_slice(&cur[..nr * 4]);
-    (card, 2 + nr * 4)
+    slot[2..run_bytes(nr)].copy_from_slice(&cur[..nr * 4]);
+    (card, run_bytes(nr))
 }
 
 /// Finish a bitmap accumulator: downgrade to an array when sparse enough
