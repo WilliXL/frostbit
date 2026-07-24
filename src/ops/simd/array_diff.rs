@@ -135,12 +135,12 @@ fn diff_tail(
     matched: u32,
     a_emitted: bool,
     out: &mut [u16],
-    mut k: usize,
 ) -> usize {
     if a_emitted {
-        return k + diff_scalar(&a[ia..], &b[ib..], &mut out[k..]);
+        return diff_scalar(&a[ia..], &b[ib..], out);
     }
     let bt = &b[ib..];
+    let mut k = 0;
     for lane in 0..8 {
         if matched & (1 << lane) == 0 {
             let x = a[ia + lane];
@@ -218,7 +218,7 @@ unsafe fn diff_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
         if bmax <= amax {
             ib += 8;
             if ib + 8 > nb {
-                return diff_tail(a, ia, b, ib, matched, amax <= bmax, out, k);
+                return k + diff_tail(a, ia, b, ib, matched, amax <= bmax, &mut out[k..]);
             }
             vb = vld1q_u16(b.as_ptr().add(ib));
         }
@@ -282,7 +282,7 @@ unsafe fn diff_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
         if bmax <= amax {
             ib += 8;
             if ib + 8 > nb {
-                return diff_tail(a, ia, b, ib, matched, amax <= bmax, out, k);
+                return k + diff_tail(a, ia, b, ib, matched, amax <= bmax, &mut out[k..]);
             }
             vb = _mm_loadu_si128(b.as_ptr().add(ib).cast());
         }

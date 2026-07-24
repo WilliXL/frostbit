@@ -443,9 +443,9 @@ fn bench(c: &mut Criterion) {
     }
 
     let sets: [(&str, &Set); 3] = [("sparse", &sparse), ("dense", &dense), ("runs", &runs)];
-    sweep(c, "intersect", |v| intersect_fast(v), rb_and, &sets);
-    sweep(c, "union", |v| union_fast(v), rb_or, &sets);
-    sweep(c, "diff", |v| difference_fast(v), rb_diff, &sets);
+    sweep(c, "intersect", intersect_fast, rb_and, &sets);
+    sweep(c, "union", union_fast, rb_or, &sets);
+    sweep(c, "diff", difference_fast, rb_diff, &sets);
 }
 
 criterion_group! {

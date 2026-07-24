@@ -155,7 +155,7 @@ pub fn gen_profiled(st: &mut u64, budget: usize, depth: usize, prof: &Profile, n
         );
     }
     // Node width: mostly narrow, occasionally very wide (up to the full budget).
-    let max_w = if prof.wide && splitmix64(st) % 8 == 0 { budget } else { 2 + budget.min(6) };
+    let max_w = if prof.wide && splitmix64(st).is_multiple_of(8) { budget } else { 2 + budget.min(6) };
     let w = 2 + (splitmix64(st) as usize) % (max_w.min(budget).max(2) - 1);
     // Split the leaf budget unevenly across children (colliding cuts collapse,
     // so the total leaf count never exceeds the budget).
@@ -211,7 +211,7 @@ pub fn gen_pillar(st: &mut u64, pool_len: usize) -> Spec {
         if r < 20 && m == 1 {
             // Diff level (binary): the spine randomly on either side.
             let l = rand_leaf(st);
-            cur = if splitmix64(st) % 2 == 0 { diff(cur, l) } else { diff(l, cur) };
+            cur = if splitmix64(st).is_multiple_of(2) { diff(cur, l) } else { diff(l, cur) };
             continue;
         }
         let mut kids: Vec<Spec> = (0..m).map(|_| rand_leaf(st)).collect();
@@ -226,7 +226,7 @@ pub fn gen_pillar(st: &mut u64, pool_len: usize) -> Spec {
 /// The 25k-tree corpus: up to 100 leaves and 15 levels per tree, deterministic.
 /// The last 100 trees are pillars — guaranteed 100-leaf AND 15-deep.
 pub fn corpus_specs(n_trees: usize, pool_len: usize) -> Vec<Spec> {
-    let mut st = 0xC0_2b_05_2026_u64;
+    let mut st = 0x00C0_2B05_2026_u64;
     let pillars = 100.min(n_trees);
     let mut specs: Vec<Spec> = (0..n_trees - pillars)
         .map(|_| {
@@ -241,7 +241,7 @@ pub fn corpus_specs(n_trees: usize, pool_len: usize) -> Vec<Spec> {
                 leaf_pct: splitmix64(&mut st) % 45,
                 diff_pct: splitmix64(&mut st) % 35,
                 or_pct: 20 + splitmix64(&mut st) % 60,
-                wide: splitmix64(&mut st) % 3 == 0,
+                wide: splitmix64(&mut st).is_multiple_of(3),
             };
             gen_profiled(&mut st, budget, depth, &prof, pool_len)
         })

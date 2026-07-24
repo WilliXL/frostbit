@@ -139,8 +139,8 @@ fn main() {
             an += f.ands as f64;
             or_ += f.ors as f64;
             df += f.diffs as f64;
-            for k in 0..4 {
-                cl[k] += f.class[k] as f64;
+            for (c, &fc) in cl.iter_mut().zip(&f.class) {
+                *c += fc as f64;
             }
             wd = wd.max(f.max_width as f64);
         }

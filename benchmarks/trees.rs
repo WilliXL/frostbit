@@ -60,7 +60,7 @@ fn bench(c: &mut Criterion) {
     // Named shapes plus random trees across size classes.
     let mut specs: Vec<(String, Spec)> =
         named().into_iter().map(|(n, s)| (n.to_string(), s)).collect();
-    let mut st = 0xA11C_E5_u64;
+    let mut st = 0x00A1_1CE5_u64;
     for (cname, budget) in [("tiny", 3usize), ("small", 9), ("medium", 22), ("large", 45)] {
         for j in 0..2 {
             let spec = gen(&mut st, budget, pool.len());

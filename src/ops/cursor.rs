@@ -256,6 +256,11 @@ impl FoldScratch {
 
     /// Borrow the (empty) cursor and ref buffers relabeled to the inputs'
     /// lifetime `'b`.
+    // The second cast in each pair only changes the element lifetime, invisible
+    // to clippy (lifetimes are erased in the cast type) so it reads as a
+    // redundant same-type cast — but it is load-bearing: dropping it (clippy's
+    // suggestion) keeps the `'static` element lifetime and fails to compile.
+    #[allow(clippy::unnecessary_cast)]
     #[inline]
     pub fn borrow<'b>(&mut self) -> (&mut Vec<ContainerCursor<'b>>, &mut Vec<ContainerRef<'b>>) {
         debug_assert!(self.cursors.is_empty() && self.refs.is_empty());

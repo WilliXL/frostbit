@@ -51,7 +51,7 @@ fn random_tree<'a>(
     pool: &'a Pool,
     depth: u32,
 ) -> (BitmapExpr<'a>, RoaringBitmap) {
-    if depth == 0 || splitmix64(st) % 3 == 0 {
+    if depth == 0 || splitmix64(st).is_multiple_of(3) {
         let i = (splitmix64(st) as usize) % pool.frozen.len();
         return (BitmapExpr::leaf(pool.frozen[i].view()), pool.roaring[i].clone());
     }

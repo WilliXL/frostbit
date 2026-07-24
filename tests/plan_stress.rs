@@ -222,7 +222,7 @@ fn gen_input(st: &mut u64) -> Vec<u32> {
                 .unwrap();
             // spread so it's an array/bitmap (step 1 would be a run)
             for i in 0..card {
-                let lo = (i as u64 * 1) as u64;
+                let lo = i as u64;
                 if lo > 0xFFFF {
                     break;
                 }

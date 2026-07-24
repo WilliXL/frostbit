@@ -43,7 +43,7 @@ fn run_ending_at_container_edge() {
 #[test]
 fn multi_container_mixed_types() {
     let mut vals: Vec<u32> = (0..1000).collect(); // run
-    vals.extend((131_072..131_372).map(|v| v)); // run
+    vals.extend(131_072..131_372); // run
     vals.extend((262_144..262_344).map(|i| i * 2 - 262_144)); // array-ish spread
     vals.sort_unstable();
     vals.dedup();

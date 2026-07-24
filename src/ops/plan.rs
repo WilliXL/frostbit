@@ -123,10 +123,22 @@ pub(crate) const UNION_DENSE_CARD: u32 = ARRAY_MAX_SIZE as u32;
 /// kernels whose fixed cost measured 3x higher — see the ablation ledger.)
 #[inline]
 pub(crate) fn union_promotes(n: usize, sum_card: u32) -> bool {
+    // A lone container at a key is copied, never merged, so there is no
+    // array-merge cost to trade against a bitmap — it must never promote. This
+    // also guards the `coef` arithmetic, which underflows below n = 2
+    // (`85·1·2 − 86 − 170`) and would overflow u64 for absurdly large n.
+    if !(2..=MAX_UNION_FANIN).contains(&n) {
+        return n > MAX_UNION_FANIN; // beyond the fitted range, always promote
+    }
     let n = n as u64;
     let coef = 85 * n * (n + 1) - 86 * n - 170;
     sum_card as u64 * coef > 40_000 * n
 }
+
+/// Fan-in past which the promotion formula is out of its fitted range (and its
+/// `u64` `coef` would eventually overflow); above it a key's union is dense
+/// enough that a bitmap accumulator always wins, so promote unconditionally.
+const MAX_UNION_FANIN: usize = 1 << 20;
 
 /// Tree-interior promotion: conservative, because a bitmap intermediate is
 /// consumed by a parent fold — measured on the corpus, aggressive promotion
@@ -211,8 +223,7 @@ pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
         }
     } else {
         cursors.extend((0..inputs.len()).map(|i| inputs.cursor(i)));
-        loop {
-            let Some(key) = min_key(cursors) else { break };
+        while let Some(key) = min_key(cursors) {
             let mut present = 0usize;
             let mut min_card = u32::MAX;
             for c in cursors.iter_mut() {
@@ -244,8 +255,7 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let (cursors, _) = scratch.borrow();
     cursors.extend((0..inputs.len()).map(|i| inputs.cursor(i)));
 
-    loop {
-        let Some(key) = min_key(cursors) else { break };
+    while let Some(key) = min_key(cursors) {
         let mut sum_card = 0u32;
         let mut total_runs = 0usize;
         let mut any_bitmap = false;

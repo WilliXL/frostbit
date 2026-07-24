@@ -37,6 +37,12 @@ impl<'a> FrozenBitmapView<'a> {
         if bytes.len() < INLINE_HEADER_SIZE + count * 4 {
             return None;
         }
+        // With values present, they are reinterpreted as `&[u32]` (align 4) when
+        // this view feeds an op; reject a base that would fault the zero-copy
+        // cast. An empty inline bitmap has nothing to cast, so any base is fine.
+        if count > 0 && !(bytes.as_ptr() as usize).is_multiple_of(std::mem::align_of::<u32>()) {
+            return None;
+        }
         let mut prev: Option<u32> = None;
         for i in 0..count {
             let v = read_u32(bytes, INLINE_HEADER_SIZE + i * 4);
@@ -55,6 +61,13 @@ impl<'a> FrozenBitmapView<'a> {
     }
 
     fn parse_standard(bytes: &'a [u8]) -> Option<Self> {
+        // Container payloads are reinterpreted as `&[u16]` / `&[Run]` / `&[u64]`
+        // (max align 8) zero-copy. Payloads sit at 8- or 64-aligned offsets from
+        // the base, so an 8-aligned base makes every one correctly aligned;
+        // otherwise the first op would fault inside `bytemuck`.
+        if !(bytes.as_ptr() as usize).is_multiple_of(WORD_ALIGN) {
+            return None;
+        }
         let h = Header::parse(bytes)?;
         let n = h.num_containers as usize;
 
@@ -89,6 +102,15 @@ impl<'a> FrozenBitmapView<'a> {
                 _ => return None,
             };
             if start.checked_add(size)? > bytes.len() {
+                return None;
+            }
+            // Payload bytes are in-bounds; now validate their *content*, so the
+            // structural guarantees every reader and kernel relies on actually
+            // hold — sorted-unique arrays, in-range non-overlapping runs, and
+            // cardinalities that match the payload. Without this the type is
+            // "structurally valid" only, and corrupt-but-well-sized bytes turn
+            // into wrong answers, panics, or (in the merge kernels) OOB writes.
+            if !payload_is_valid(bytes, e.typ, e.cardinality, start) {
                 return None;
             }
         }
@@ -467,4 +489,61 @@ fn run_contains(bytes: &[u8], start: usize, lo16: u16) -> bool {
         }
     }
     false
+}
+
+/// Validate one container's payload *content*, given its bytes are already known
+/// to be in-bounds. Enforces the invariants the readers and kernels assume:
+/// - **array**: lows strictly ascending (⇒ sorted and unique);
+/// - **run**: at least one run, each `start + len ≤ 0xFFFF` (no `u16` wrap),
+///   runs ascending and non-overlapping, `Σ(len + 1)` equal to `card`;
+/// - **bitmap**: exactly `card` bits set.
+///
+/// Only called from [`FrozenBitmapView::from_bytes`] (the untrusted boundary);
+/// the trusted path skips it, so frostbit-produced bitmaps pay nothing.
+fn payload_is_valid(bytes: &[u8], typ: u8, card: u32, start: usize) -> bool {
+    match typ {
+        CT_ARRAY => {
+            let mut prev: Option<u16> = None;
+            for j in 0..card as usize {
+                let v = read_u16(bytes, start + j * 2);
+                if prev.is_some_and(|p| v <= p) {
+                    return false;
+                }
+                prev = Some(v);
+            }
+            true
+        }
+        CT_BITMAP => {
+            let mut pop = 0u32;
+            for w in 0..BITMAP_WORDS {
+                pop += read_u64(bytes, start + w * 8).count_ones();
+            }
+            pop == card
+        }
+        CT_RUN => {
+            let nr = read_u16(bytes, start) as usize;
+            // A canonical run container has 1..=MAX_RUNS runs (more would have
+            // been stored as a bitmap). Rejecting the rest also keeps the
+            // planner's "slot capacity ≤ BITMAP_BYTES" invariant intact (SAFE-11).
+            if nr == 0 || nr > MAX_RUNS {
+                return false;
+            }
+            let (mut total, mut prev_end): (u32, Option<u32>) = (0, None);
+            for r in 0..nr {
+                let off = start + 2 + r * 4;
+                let s = read_u16(bytes, off) as u32;
+                let len = read_u16(bytes, off + 2) as u32;
+                let end = s + len;
+                // In range (no u16 wrap) and strictly past the previous run's
+                // end (ascending, non-overlapping — adjacency is allowed).
+                if end > 0xFFFF || prev_end.is_some_and(|pe| s <= pe) {
+                    return false;
+                }
+                total += len + 1;
+                prev_end = Some(end);
+            }
+            total == card
+        }
+        _ => false,
+    }
 }

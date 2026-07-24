@@ -118,7 +118,7 @@ impl<'a> BitmapExpr<'a> {
     /// Evaluate the tree into one [`FrozenBitmap`].
     pub fn materialize(&self) -> FrozenBitmap {
         match self {
-            BitmapExpr::Leaf(v) => FrozenBitmap::from_bytes(v.as_bytes()).expect("valid leaf"),
+            BitmapExpr::Leaf(v) => FrozenBitmap::from_bytes_trusted(v.as_bytes()),
             BitmapExpr::Owned(bm) => (**bm).clone(),
             BitmapExpr::Combined(plan) => plan.execute(),
         }
@@ -266,7 +266,7 @@ impl<'a> FoldPlan<'a> {
         // Terminal result → compact (smallest), like roaring's output.
         match stack.pop().expect("non-empty plan") {
             Acc::Arena(a) => a.serialize_compact(),
-            Acc::Leaf(v) => FrozenBitmap::from_bytes(v.as_bytes()).expect("valid leaf"),
+            Acc::Leaf(v) => FrozenBitmap::from_bytes_trusted(v.as_bytes()),
             Acc::Empty => FrozenBitmapBuilder::new().finish(),
         }
     }
@@ -310,6 +310,11 @@ impl ExecStack {
     }
 
     /// Borrow the (empty) stack buffer relabeled to the leaves' lifetime `'a`.
+    // The second pointer cast only changes the element lifetime, which clippy
+    // can't see (lifetimes are erased in the cast type), so it reads as a
+    // redundant same-type cast — but it is load-bearing: dropping it (clippy's
+    // suggestion) yields a `Vec<Acc<'static>>` and fails to compile.
+    #[allow(clippy::unnecessary_cast)]
     #[inline]
     fn borrow<'a>(&mut self) -> &mut Vec<Acc<'a>> {
         debug_assert!(self.v.is_empty());

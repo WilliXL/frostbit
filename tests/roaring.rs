@@ -106,7 +106,7 @@ fn ten_million_mixed() {
     let evens = RoaringBitmap::from_sorted_iter((4_000_000..10_000_000u32).filter(|v| v % 2 == 0))
         .unwrap();
     rb |= evens;
-    let mut st = 0x3133_7_u64;
+    let mut st = 0x0003_1337_u64;
     for _ in 0..1_000_000 {
         rb.insert(100_000_000 + (splitmix64(&mut st) % 900_000_000) as u32);
     }

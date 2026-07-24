@@ -547,24 +547,28 @@ fn diff_apply(arena: &mut OpArena, i: usize, p: &ContainerRef<'_>, is_last: bool
         CT_RUN => {
             // Splitting can add a fragment per subtrahend item; leave run form
             // before the count can overflow. (A run accumulator here means
-            // card > 4096, so the slot is bitmap-sized — either form fits.)
-            let bound = st.runs as usize
-                + match p.typed() {
-                    Data::Run(r) => r.len(),
-                    Data::Array(a) => a.len(),
-                    _ => usize::MAX,
-                };
-            if bound > MAX_RUNS {
+            // card > 4096, so the slot is bitmap-sized — either form fits.) A
+            // bitmap/inline partner can't be subtracted in run form at all, so
+            // it forces a bitmap conversion; branch on the partner type
+            // explicitly (as `union_apply` does) rather than via an arithmetic
+            // sentinel, which would overflow `st.runs + usize::MAX`.
+            let (splittable, extra) = match p.typed() {
+                Data::Run(r) => (true, r.len()),
+                Data::Array(a) => (true, a.len()),
+                _ => (false, 0),
+            };
+            if !splittable || st.runs as usize + extra > MAX_RUNS {
                 run_acc_to_bitmap(arena, i);
                 return diff_apply(arena, i, p, is_last);
             }
+            let bound = st.runs as usize + extra;
             let (cur, other) = arena.slot_pair(i);
             let src = slot_runs(cur, st.runs);
             let dst: &mut [Run] = bytemuck::cast_slice_mut(&mut other[2..2 + bound * 4]);
             let (nr, card) = match p.typed() {
                 Data::Run(rr) => run::diff(src, rr, dst),
                 Data::Array(ra) => run::diff_array(src, ra, dst),
-                _ => unreachable!("a bitmap partner bounds to MAX above"),
+                _ => unreachable!("a non-splittable partner converts to bitmap above"),
             };
             write_u16(other, 0, nr as u16);
             arena.flip_side(i);

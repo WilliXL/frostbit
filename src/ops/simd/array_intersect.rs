@@ -128,7 +128,12 @@ unsafe fn intersect_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
             k += (bits as u32).count_ones() as usize;
         } else {
             let mut b = bits as u32;
-            while b != 0 {
+            // Bound the tail against `out.len()`. On sorted-unique inputs the
+            // total match count is ≤ out.len(), so this never truncates a valid
+            // result; it prevents an out-of-bounds write if the merge is ever
+            // handed unsorted/duplicate data (defense-in-depth behind the
+            // sortedness validation in `FrozenBitmapView::from_bytes`).
+            while b != 0 && k < out.len() {
                 let i = b.trailing_zeros() as usize;
                 *out.get_unchecked_mut(k) = *a.get_unchecked(ia + i);
                 k += 1;
@@ -259,7 +264,12 @@ unsafe fn intersect_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
             k += (bits as u32).count_ones() as usize;
         } else {
             let mut b = bits as u32;
-            while b != 0 {
+            // Bound the tail against `out.len()`. On sorted-unique inputs the
+            // total match count is ≤ out.len(), so this never truncates a valid
+            // result; it prevents an out-of-bounds write if the merge is ever
+            // handed unsorted/duplicate data (defense-in-depth behind the
+            // sortedness validation in `FrozenBitmapView::from_bytes`).
+            while b != 0 && k < out.len() {
                 let i = b.trailing_zeros() as usize;
                 *out.get_unchecked_mut(k) = *a.get_unchecked(ia + i);
                 k += 1;

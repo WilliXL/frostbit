@@ -81,14 +81,29 @@ impl Drop for FrozenBitmap {
 impl FrozenBitmap {
     /// Validate and copy frozen-bitmap `bytes` into a 64-byte-aligned buffer.
     /// `None` if `bytes` is not a well-formed frozen bitmap.
+    ///
+    /// Any source alignment is accepted: the bytes are copied into the aligned
+    /// owned buffer first and that (always op-safe) copy is validated, so unlike
+    /// [`FrozenBitmapView::from_bytes`] there is no base-alignment precondition.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        crate::FrozenBitmapView::from_bytes(bytes)?;
         let mut buf = result_buf(bytes.len());
         buf.extend_from_slice(bytes);
+        crate::FrozenBitmapView::from_bytes(&buf)?;
         Some(Self { buf })
     }
 
     pub(crate) fn from_buf(buf: AlignedBuf) -> Self {
+        Self { buf }
+    }
+
+    /// Copy already-valid frozen bytes into an owned, aligned buffer, skipping
+    /// validation. The caller guarantees `bytes` came from a valid frozen source
+    /// (e.g. a live [`FrozenBitmapView`], whose bytes were validated when it was
+    /// parsed) — used on the hot materialize path where re-validating a trusted
+    /// leaf would be pure overhead.
+    pub(crate) fn from_bytes_trusted(bytes: &[u8]) -> Self {
+        let mut buf = result_buf(bytes.len());
+        buf.extend_from_slice(bytes);
         Self { buf }
     }
 
