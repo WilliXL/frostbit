@@ -176,3 +176,56 @@ fn and_root_trees_match_roaring() {
         assert_tree(&expr, &acc.unwrap());
     }
 }
+
+/// Flattening must reach the *analyzer*, not just the step list.
+///
+/// A nested same-op tree and its flat spelling are the same operation, so they
+/// must plan identically — same operand count, same per-key accumulator forms,
+/// hence the same cost. When `splice` inlined a flattened child's steps but
+/// handed `combine` the child's merged shape, the executor folded k operands
+/// while the analyzer modelled one pre-unioned container carrying k operands'
+/// fan-in; that reads far denser than the truth and promoted array keys to
+/// bitmap accumulators, making nested ORs up to 10x their flat equivalent.
+///
+/// Results were always correct, so only timing could catch it. This asserts the
+/// structural property instead: identical results *and* an identical byte image,
+/// at any nesting depth, since the serialized container forms are what diverged.
+#[test]
+fn nested_same_op_plans_like_its_flat_spelling() {
+    let mut st = 0x11A7_2026_u64;
+    let pool = Pool::new(&mut st, 10);
+    let l = |i: usize| BitmapExpr::leaf(pool.frozen[i].view());
+
+    for (flat, nested) in [
+        (
+            BitmapExpr::or([l(0), l(1), l(2), l(3), l(4)]),
+            BitmapExpr::or([l(0), BitmapExpr::or([l(1), l(2), l(3), l(4)])]),
+        ),
+        (
+            // Right-deep: flattening has to be transitive, not one level.
+            BitmapExpr::or([l(5), l(6), l(7), l(8), l(9)]),
+            BitmapExpr::or([
+                l(5),
+                BitmapExpr::or([l(6), BitmapExpr::or([l(7), BitmapExpr::or([l(8), l(9)])])]),
+            ]),
+        ),
+        (
+            BitmapExpr::and([l(0), l(1), l(2), l(3)]),
+            BitmapExpr::and([BitmapExpr::and([l(0), l(1)]), BitmapExpr::and([l(2), l(3)])]),
+        ),
+    ] {
+        let (a, b) = (flat.materialize(), nested.materialize());
+        assert_eq!(a.view().iter().collect::<Vec<_>>(), b.view().iter().collect::<Vec<_>>());
+        assert_eq!(a.as_bytes(), b.as_bytes(), "nested picked different container forms");
+    }
+
+    // A DIFF between them must stay unflattened (not associative) yet still
+    // agree with the oracle, so the splice change cannot have leaked into it.
+    let d = BitmapExpr::difference(
+        BitmapExpr::or([l(0), BitmapExpr::or([l(1), l(2)])]),
+        BitmapExpr::or([l(3), l(4)]),
+    );
+    let want = (&(&pool.roaring[0] | &pool.roaring[1]) | &pool.roaring[2])
+        - (&pool.roaring[3] | &pool.roaring[4]);
+    assert_eq!(d.materialize().view().iter().collect::<Vec<_>>(), want.iter().collect::<Vec<_>>());
+}

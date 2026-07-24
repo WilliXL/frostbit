@@ -121,18 +121,21 @@ pub fn intersect_shape(inputs: &[Shape]) -> Shape {
 }
 
 /// OR: union of keys; mirrors `union_key`'s bitmap/array/run choice.
-/// `weights[i]` is input `i`'s flattened operand count: a summarized sub-union
-/// stands for that many executor operands, so the fan-in promotion predicate
-/// must count it as such (an upper bound on the runtime fan-in per key).
-pub fn union_shape(inputs: &[Shape], weights: &[usize]) -> Shape {
-    debug_assert_eq!(inputs.len(), weights.len());
+///
+/// One input per executor operand, so per-key fan-in is just how many inputs
+/// are live at that key. This used to take a parallel `weights` slice, because
+/// a flattened sub-union arrived as one summarized shape standing for k
+/// operands; counting it as k spread that fan-in over an already-merged
+/// container and over-promoted. Callers now splice the sub-union's own operands
+/// in, so there is nothing left to weight.
+pub fn union_shape(inputs: &[Shape]) -> Shape {
     let mut curs: Vec<Cur> = inputs.iter().map(Cur::new).collect();
     // A union spans at least the widest input's keys.
     let mut out = Vec::with_capacity(inputs.iter().map(Vec::len).max().unwrap_or(0));
     while let Some(key) = min_key(&curs) {
         let (mut sum, mut runs, mut any_bitmap, mut all_run, mut max_single, mut n) =
             (0u32, 0usize, false, true, 0u32, 0usize);
-        for (c, w) in curs.iter_mut().zip(weights) {
+        for c in curs.iter_mut() {
             if c.key() == Some(key) {
                 let m = c.take();
                 sum = sum.saturating_add(m.card);
@@ -140,7 +143,7 @@ pub fn union_shape(inputs: &[Shape], weights: &[usize]) -> Shape {
                 any_bitmap |= m.typ == CT_BITMAP;
                 all_run &= m.typ == CT_RUN;
                 max_single = max_single.max(m.stored());
-                n += w;
+                n += 1;
             }
         }
         let c = decide::union_key(

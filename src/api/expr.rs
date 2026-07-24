@@ -54,6 +54,13 @@ enum Step<'a> {
 struct FoldPlan<'a> {
     steps: Vec<Step<'a>>,
     shape: Shape,
+    /// One shape per operand the *executor* folds — never one per child. A
+    /// flattened child contributes its own operands here, not the merged shape
+    /// it would have produced, so the analyzer models exactly the operand list
+    /// the steps present. Keeping these is what makes flattening transitive:
+    /// a grandchild flattened into a child is already expanded in the child's
+    /// `operands`, so it arrives fully expanded at the parent.
+    operands: Vec<Shape>,
     max_depth: usize,
     /// Whether this node is an AND whose key set is narrower than some child's
     /// — the only shape where a hole-punch mask prunes anything.
@@ -146,12 +153,9 @@ impl<'a> FoldPlan<'a> {
     fn combine(op: Op, children: impl IntoIterator<Item = BitmapExpr<'a>>) -> Self {
         let mut steps = Vec::new();
         let mut shapes: Vec<Shape> = Vec::new();
-        let mut weights: Vec<usize> = Vec::new();
         let (mut arity, mut base, mut max_depth) = (0u32, 0usize, 0usize);
         for child in children {
-            let (shape, net, depth, guardable) = splice(child, op, &mut steps);
-            shapes.push(shape);
-            weights.push(net as usize);
+            let (net, depth, guardable) = splice(child, op, &mut steps, &mut shapes);
             max_depth = max_depth.max(base + depth);
             base += net as usize;
             arity += net;
@@ -164,7 +168,7 @@ impl<'a> FoldPlan<'a> {
         }
         let (pop, shape) = match op {
             Op::And => (PlanOp::Intersect, shape::intersect_shape(&shapes)),
-            Op::Or => (PlanOp::Union, shape::union_shape(&shapes, &weights)),
+            Op::Or => (PlanOp::Union, shape::union_shape(&shapes)),
             Op::Diff => unreachable!("combine is AND/OR only"),
         };
         // Auto hole-punch applies when this AND's intersected key set is
@@ -181,6 +185,7 @@ impl<'a> FoldPlan<'a> {
         FoldPlan {
             steps,
             shape,
+            operands: shapes,
             max_depth: max_depth.max(base).max(1),
             narrows,
             live: OnceLock::new(),
@@ -190,20 +195,23 @@ impl<'a> FoldPlan<'a> {
     /// `lhs` minus `rhs` (never flattened — DIFF is not associative).
     fn diff(lhs: BitmapExpr<'a>, rhs: BitmapExpr<'a>) -> Self {
         let mut steps = Vec::new();
-        let (s0, _, d0, lhs_guardable) = splice(lhs, Op::Diff, &mut steps); // Op::Diff never flattens
+        // Op::Diff never flattens, so each splice contributes exactly one operand.
+        let mut shapes: Vec<Shape> = Vec::new();
+        let (_, d0, lhs_guardable) = splice(lhs, Op::Diff, &mut steps, &mut shapes);
         // An empty lhs makes the whole difference empty (the rhs only removes),
         // so guard it and skip evaluating the rhs.
         if lhs_guardable {
             steps.push(Step::Guard { skip: u32::MAX, pop: 1 });
         }
-        let (s1, _, d1, _) = splice(rhs, Op::Diff, &mut steps);
-        let shape = shape::diff_shape(&[s0, s1]);
+        let (_, d1, _) = splice(rhs, Op::Diff, &mut steps, &mut shapes);
+        let shape = shape::diff_shape(&shapes);
         let after = steps.len() + 1;
         steps.push(Step::Combine(2, shape::to_plan(PlanOp::Diff, &shape)));
         patch_guards(&mut steps, after);
         FoldPlan {
             steps,
             shape,
+            operands: shapes,
             max_depth: d0.max(1 + d1).max(2),
             narrows: false,
             live: OnceLock::new(),
@@ -387,20 +395,24 @@ impl Inputs for Masked<'_, '_> {
 /// and yield its output [`Shape`] for the parent's analysis (moved out of a
 /// sub-plan, never cloned). Returns `(shape, net operands contributed, peak
 /// stack depth during its steps)`.
-fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (Shape, u32, usize, bool) {
+fn splice<'a>(
+    child: BitmapExpr<'a>,
+    parent: Op,
+    steps: &mut Vec<Step<'a>>,
+    shapes: &mut Vec<Shape>,
+) -> (u32, usize, bool) {
     match child.0 {
         Node::Leaf(v) => {
-            let shape = view_shape(&v);
+            shapes.push(view_shape(&v));
             steps.push(Step::Leaf(v));
-            (shape, 1, 1, false)
+            (1, 1, false)
         }
         Node::Owned(b) => {
-            let shape = view_shape(&b.view());
+            shapes.push(view_shape(&b.view()));
             steps.push(Step::Owned(b));
-            (shape, 1, 1, false)
+            (1, 1, false)
         }
         Node::Combined(mut fp) => {
-            let shape = std::mem::take(&mut fp.shape);
             let root = fp.steps.last().map(|s| match s {
                 Step::Combine(_, p) => p.op,
                 _ => unreachable!("a plan always ends in a Combine"),
@@ -416,12 +428,24 @@ fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (
                 // The flattened operands are guarded, if at all, by this op.
                 fp.steps.retain(|s| !matches!(s, Step::Guard { .. }));
                 steps.append(&mut fp.steps);
-                (shape, k, fp.max_depth, false)
+                // The child's *operands* come up with its steps — not the merged
+                // shape those steps would have produced, which no longer exists
+                // now that its Combine is gone. Handing the parent one coarse
+                // pre-merged shape in place of k real ones is how the analyzer
+                // used to drift from the executor: it saw k operands' worth of
+                // fan-in spread over a single already-unioned container, which
+                // reads as far denser than the truth and promotes array
+                // accumulators to bitmaps that the flat spelling never needed.
+                debug_assert_eq!(fp.operands.len(), k as usize, "operand count must equal arity");
+                shapes.append(&mut fp.operands);
+                (k, fp.max_depth, false)
             } else {
                 // A non-flattened subtree: a single operand whose result may be
-                // empty — the caller guards it.
+                // empty — the caller guards it. Here the merged shape *is* the
+                // operand, because the executor really does fold one container.
+                shapes.push(std::mem::take(&mut fp.shape));
                 steps.append(&mut fp.steps);
-                (shape, 1, fp.max_depth, true)
+                (1, fp.max_depth, true)
             }
         }
     }

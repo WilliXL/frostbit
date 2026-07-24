@@ -76,7 +76,7 @@ const COV_N: usize = 8;
 /// Each regime is asserted against roaring on all three ops before it is timed,
 /// so this group is a correctness net as much as a performance one.
 fn coverage(c: &mut Criterion) {
-    let mut st = 0xC0_5E_2026_u64;
+    let mut st = 0xC05E_2026_u64;
     let n = COV_N as u16;
 
     // Inline (FI) operands: 4000 keys holding one value each, so 4 bytes/value
