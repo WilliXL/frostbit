@@ -93,14 +93,6 @@ impl Plan {
     pub fn num_slots(&self) -> usize {
         self.slots.len()
     }
-
-    /// Total slot-data bytes (each capacity padded to 8).
-    pub fn data_bytes(&self) -> usize {
-        self.slots
-            .iter()
-            .map(|s| align_up(s.capacity as usize, WORD_ALIGN))
-            .sum()
-    }
 }
 
 /// The single array↔bitmap boundary, shared by every op so containers are

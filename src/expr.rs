@@ -107,14 +107,6 @@ impl<'a> BitmapExpr<'a> {
         }
     }
 
-    /// Number of leaves in the tree.
-    pub fn leaf_count(&self) -> usize {
-        match self {
-            BitmapExpr::Leaf(_) | BitmapExpr::Owned(_) => 1,
-            BitmapExpr::Combined(p) => p.leaf_count(),
-        }
-    }
-
     /// Evaluate the tree into one [`FrozenBitmap`].
     pub fn materialize(&self) -> FrozenBitmap {
         match self {
@@ -137,11 +129,6 @@ impl<'a> From<Arc<FrozenBitmap>> for BitmapExpr<'a> {
 }
 
 impl<'a> FoldPlan<'a> {
-    /// Peak number of operands live at once during [`execute`](Self::execute).
-    pub fn max_stack_depth(&self) -> usize {
-        self.max_depth
-    }
-
     /// True when the root fold is an intersection of ≥2 operands — the only
     /// shape whose key set narrows what its branches can contribute (a union or
     /// lone leaf spans all its leaves' keys, so a mask would prune nothing).
@@ -150,14 +137,6 @@ impl<'a> FoldPlan<'a> {
             self.steps.last(),
             Some(Step::Combine(arity, plan)) if *arity >= 2 && plan.op == PlanOp::Intersect
         )
-    }
-
-    /// Number of leaves folded by this plan.
-    pub fn leaf_count(&self) -> usize {
-        self.steps
-            .iter()
-            .filter(|s| matches!(s, Step::Leaf(_) | Step::Owned(_)))
-            .count()
     }
 
     /// Fold `children` under `op`, flattening same-op sub-plans and computing the

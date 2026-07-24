@@ -24,9 +24,6 @@ pub const MAGIC: u32 = 0x46524F5A;
 /// Version frostbit writes (compact header + SoA index).
 pub const VERSION: u16 = 3;
 
-/// Legacy version frostbit can read for interop.
-pub const VERSION_LEGACY: u16 = 2;
-
 // --- Header field offsets (16-byte header) ---------------------------------
 
 pub const H_MAGIC: usize = 0;

@@ -15,8 +15,6 @@
 use crate::container::Bitmap;
 use crate::format::BITMAP_WORDS;
 
-const BITMAP_BYTES: usize = BITMAP_WORDS * 8;
-
 mod array_diff;
 mod array_intersect;
 mod array_scan;

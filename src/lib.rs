@@ -8,9 +8,6 @@
 //! and `_compact` (smallest, for persistence). The builder always finishes
 //! compact — built bitmaps are destined for storage.
 
-// Lower layers exist before their consumers during the incremental build-up.
-#![allow(dead_code)]
-
 /// Wire-format constants and byte primitives. Public only under `internals`.
 #[cfg(feature = "internals")]
 pub mod format;

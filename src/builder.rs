@@ -83,17 +83,10 @@ impl FrozenBitmapBuilder {
         serialize_standard(&self.containers, self.total)
     }
 
-    /// Finish as standard format unconditionally (op-ready, never FRI).
+    /// Finish as standard format unconditionally (op-ready, never inline).
+    /// Exposed under `internals` for white-box tests and benchmarks.
     #[cfg(feature = "internals")]
-    pub fn finish_standard(self) -> FrozenBitmap {
-        self.finish_standard_impl()
-    }
-    #[cfg(not(feature = "internals"))]
-    pub(crate) fn finish_standard(self) -> FrozenBitmap {
-        self.finish_standard_impl()
-    }
-
-    fn finish_standard_impl(mut self) -> FrozenBitmap {
+    pub fn finish_standard(mut self) -> FrozenBitmap {
         if self.have_cur {
             self.flush();
         }

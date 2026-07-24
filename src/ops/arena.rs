@@ -324,11 +324,6 @@ impl OpArena {
         self.out.is_empty()
     }
 
-    #[inline]
-    pub fn total_cardinality(&self) -> u64 {
-        self.total_card
-    }
-
     /// Number of recorded containers — an arena read back as a container source.
     #[inline]
     pub fn container_count(&self) -> usize {

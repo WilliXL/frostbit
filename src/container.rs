@@ -54,17 +54,6 @@ impl<'a> Data<'a> {
         }
     }
 
-    /// Whether `lo` (a container-local low 16 bits) is present.
-    #[inline]
-    pub fn contains(&self, lo: u16) -> bool {
-        match self {
-            Data::Array(a) => a.binary_search(&lo).is_ok(),
-            Data::Bitmap(b) => bit(b, lo),
-            Data::Run(runs) => run_contains(runs, lo),
-            Data::Inline(ids) => ids.binary_search_by(|v| (*v as u16).cmp(&lo)).is_ok(),
-        }
-    }
-
     /// Write every low 16 bits, ascending, into `out`; returns the count.
     #[inline]
     pub fn write_sorted(&self, out: &mut [u16]) -> usize {
@@ -126,13 +115,3 @@ pub fn as_bitmap_mut(bytes: &mut [u8]) -> &mut Bitmap {
     words.try_into().expect("bitmap payload is BITMAP_WORDS words")
 }
 
-#[inline]
-fn bit(b: &Bitmap, lo: u16) -> bool {
-    (b[lo as usize / 64] >> (lo as usize % 64)) & 1 == 1
-}
-
-fn run_contains(runs: &[Run], lo: u16) -> bool {
-    // Runs are sorted by start; find the last run starting at or before `lo`.
-    let i = runs.partition_point(|r| r.start <= lo);
-    i > 0 && lo <= runs[i - 1].end()
-}

@@ -866,11 +866,6 @@ fn all_runs(refs: &[ContainerRef<'_>]) -> bool {
 }
 
 #[inline]
-fn total_runs(refs: &[ContainerRef<'_>]) -> usize {
-    refs.iter().map(|r| r.num_runs()).sum()
-}
-
-#[inline]
 fn as_runs<'a>(r: &ContainerRef<'a>) -> &'a [Run] {
     match r.typed() {
         Data::Run(runs) => runs,
