@@ -69,7 +69,7 @@ pub(super) fn as_runs<'a>(r: &ContainerRef<'a>) -> &'a [Run] {
 /// Fold `seed` then `partners` with a native run `op`, writing a `CT_RUN`
 /// container into slot `i`. Scratch is split into two run buffers and the
 /// result copied to the slot. Returns `(cardinality, data bytes)`.
-pub(super) fn run_fold(
+pub fn run_fold(
     arena: &mut OpArena,
     i: usize,
     seed: &ContainerRef<'_>,
@@ -115,7 +115,7 @@ pub(super) fn run_fold(
 /// produced it — a card-3900 extraction was 63% of a dense 4-way difference.
 /// `serialize_compact` still canonicalizes terminal results. Returns the
 /// recorded `(type, data bytes)`.
-pub(super) fn finish_bitmap(arena: &mut OpArena, i: usize, card: u32) -> (u8, usize) {
+pub fn finish_bitmap(arena: &mut OpArena, i: usize, card: u32) -> (u8, usize) {
     if card == 0 || card > (ARRAY_MAX_SIZE / 2) as u32 {
         return (CT_BITMAP, BITMAP_BYTES);
     }
@@ -135,14 +135,14 @@ pub(super) fn acc(slot: &mut [u8]) -> &mut Bitmap {
 
 /// Write a container's lows into `slot` as a sorted `u16` array; returns count.
 #[inline]
-pub(super) fn load_array(slot: &mut [u8], data: Data<'_>) -> u32 {
+pub fn load_array(slot: &mut [u8], data: Data<'_>) -> u32 {
     data.write_sorted(bytemuck::cast_slice_mut(slot)) as u32
 }
 
 /// Populate `slot` as a bitmap from `data`. A bitmap source is copied in one
 /// pass; others clear then set.
 #[inline]
-pub(super) fn load_bitmap(slot: &mut [u8], data: Data<'_>) {
+pub fn load_bitmap(slot: &mut [u8], data: Data<'_>) {
     let dst = acc(slot);
     if let Data::Bitmap(b) = data {
         simd::copy(dst, b);
@@ -313,7 +313,7 @@ impl ArrayAcc {
 /// Galloping array ∩ / ∖ run: filter sorted `acc` by run membership in one
 /// pass (O(card + runs)), keeping values inside runs when `keep_inside`.
 #[inline]
-pub(super) fn retain_runs(acc: &mut [u16], card: u32, runs: &[Run], keep_inside: bool) -> u32 {
+pub fn retain_runs(acc: &mut [u16], card: u32, runs: &[Run], keep_inside: bool) -> u32 {
     let (mut ri, mut w) = (0usize, 0usize);
     for r in 0..card as usize {
         let v = acc[r];
@@ -334,7 +334,7 @@ pub(super) fn retain_runs(acc: &mut [u16], card: u32, runs: &[Run], keep_inside:
 /// and compaction is branchless (~1 ns/value) — versus a per-probe container-enum
 /// re-match (~3 ns) — since this is the hot path for a bitmap-partner array fold.
 #[inline]
-pub(super) fn retain_bitmap(acc: &mut [u16], card: u32, b: &Bitmap, keep_inside: bool) -> u32 {
+pub fn retain_bitmap(acc: &mut [u16], card: u32, b: &Bitmap, keep_inside: bool) -> u32 {
     let mut w = 0usize;
     for r in 0..card as usize {
         let v = acc[r];

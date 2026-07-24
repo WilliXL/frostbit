@@ -5,6 +5,9 @@
 //! typed [`Data`](crate::container::Data) view, delegating the heavy lifting to
 //! [`super::simd`].
 
+#[cfg(feature = "internals")]
+pub mod accum;
+#[cfg(not(feature = "internals"))]
 mod accum;
 mod difference;
 pub mod run;

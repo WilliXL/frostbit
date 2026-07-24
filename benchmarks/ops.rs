@@ -448,12 +448,68 @@ fn bench(c: &mut Criterion) {
     sweep(c, "diff", difference_fast, rb_diff, &sets);
 }
 
+
+/// Every remaining fold stage, measured in isolation at corpus-representative
+/// sizes, so each can be checked against the `membw` roofline.
+#[cfg(feature = "internals")]
+fn stages(c: &mut Criterion) {
+    use frostbit::container::{Data, Run};
+    use frostbit::ops::kernels::accum;
+    use frostbit::ops::kernels::run as runk;
+
+    // 64 runs of 500 (a dense run container: card 32000, 258 payload bytes).
+    let mk = |off: u16| -> Vec<Run> {
+        (0..64u16).map(|i| Run { start: off + i * 1000, len: 499 }).collect()
+    };
+    let (ra, rb) = (mk(0), mk(250));
+    let mut rout = vec![Run { start: 0, len: 0 }; 4096];
+    let pts: Vec<u16> = (0..800u16).map(|i| i * 80).collect();
+
+    let mut g = c.benchmark_group("stage");
+    g.bench_function("run_intersect/64x64", |b| {
+        b.iter(|| black_box(runk::intersect(&ra, &rb, &mut rout)))
+    });
+    g.bench_function("run_union/64x64", |b| {
+        b.iter(|| black_box(runk::union(&ra, &rb, &mut rout)))
+    });
+    g.bench_function("run_diff/64x64", |b| {
+        b.iter(|| black_box(runk::diff(&ra, &rb, &mut rout)))
+    });
+    g.bench_function("run_diff_array/64x800", |b| {
+        b.iter(|| black_box(runk::diff_array(&ra, &pts, &mut rout)))
+    });
+
+    // Array accumulator filtered by a run / bitmap partner (in-place compaction).
+    let mut acc: Vec<u16> = (0..4000u16).map(|i| i * 16).collect();
+    g.bench_function("retain_runs/4000x64", |b| {
+        b.iter(|| black_box(accum::retain_runs(&mut acc, 4000, &ra, true)))
+    });
+    let mut dense = vec![0u8; 8192];
+    for i in 0..4000u32 {
+        let v = (i * 16) as usize;
+        dense[v / 8] |= 1 << (v % 8);
+    }
+    let bm = frostbit::container::as_bitmap(&dense);
+    g.bench_function("retain_bitmap/4000", |b| {
+        b.iter(|| black_box(accum::retain_bitmap(&mut acc, 4000, bm, true)))
+    });
+
+    // Extraction: whole bitmap -> sorted u16 array (the finish_bitmap body).
+    let mut slot = vec![0u8; 8192];
+    g.bench_function("load_array/from_bitmap4000", |b| {
+        b.iter(|| black_box(accum::load_array(&mut slot, Data::Bitmap(bm))))
+    });
+    g.finish();
+}
+#[cfg(not(feature = "internals"))]
+fn stages(_c: &mut Criterion) {}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .sample_size(30)
         .warm_up_time(Duration::from_millis(1200))
         .measurement_time(Duration::from_secs(4));
-    targets = bench, decomp, branches, membw
+    targets = bench, decomp, branches, membw, stages
 }
 criterion_main!(benches);
