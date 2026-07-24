@@ -200,7 +200,7 @@ pub fn prewarm() {
     if sizes.is_empty() {
         return;
     }
-    crate::bitmap::prewarm_result_pool(&sizes);
+    crate::api::bitmap::prewarm_result_pool(&sizes);
     crate::ops::arena::prewarm_arena_pool(&sizes);
 }
 
@@ -211,16 +211,16 @@ pub fn prewarm() {
 /// their fold releases them, and later folds re-warm as usual. To stop pooling
 /// entirely, configure `buffers(0)`.
 pub fn clear() {
-    crate::bitmap::clear_result_pool();
+    crate::api::bitmap::clear_result_pool();
     crate::ops::arena::clear_arena_pool();
-    crate::expr::clear_stack_pool();
+    crate::api::expr::clear_stack_pool();
     crate::ops::cursor::clear_scratch_pool();
     crate::ops::analyze::plan::clear_slot_pool();
 }
 
 /// A snapshot of this thread's byte-buffer pools.
 pub fn stats() -> PoolStats {
-    let (result_live, result_retained, result_bytes) = crate::bitmap::result_pool_stats();
+    let (result_live, result_retained, result_bytes) = crate::api::bitmap::result_pool_stats();
     let (arena_live, arena_retained, arena_bytes) = crate::ops::arena::arena_pool_stats();
     PoolStats {
         live: result_live + arena_live,

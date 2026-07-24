@@ -1,6 +1,6 @@
 //! Builds a frozen bitmap from values pushed in strictly ascending order.
 
-use crate::bitmap::{result_buf, FrozenBitmap};
+use crate::api::bitmap::{result_buf, FrozenBitmap};
 use crate::format::*;
 
 /// Accumulates ascending `u32`s, then serializes to a [`FrozenBitmap`].

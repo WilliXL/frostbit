@@ -280,7 +280,7 @@ struct ExecStack {
 
 mod stack_pool {
     use super::Acc;
-    use crate::pool::Pool;
+    use crate::api::pool::Pool;
 
     thread_local! {
         static POOL: Pool<Vec<Acc<'static>>> = const { Pool::new("operand-stack") };

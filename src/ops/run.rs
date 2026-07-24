@@ -6,7 +6,7 @@
 //! ascending and non-overlapping. Callers size `out` for the worst case
 //! (`a.len() + b.len()`), which the kernels bound to `MAX_RUNS`.
 
-use crate::container::Run;
+use crate::api::container::Run;
 
 #[inline]
 fn run(start: u32, end: u32) -> Run {

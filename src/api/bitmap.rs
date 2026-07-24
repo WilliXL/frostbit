@@ -20,7 +20,7 @@ pub(crate) fn aligned_buf(cap: usize) -> AlignedBuf {
 /// on the hot path once warm, matching the arena/cursor/stack scratch pools.
 mod result_pool {
     use super::{aligned_buf, AlignedBuf};
-    use crate::pool::Pool;
+    use crate::api::pool::Pool;
 
     thread_local! {
         static POOL: Pool<AlignedBuf> = const { Pool::cache("result") };

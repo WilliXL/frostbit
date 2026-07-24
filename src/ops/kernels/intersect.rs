@@ -1,13 +1,13 @@
 //! N-way intersection (AND).
 
-use crate::container::Data;
+use crate::api::container::Data;
 use crate::format::*;
 use crate::ops::arena::OpArena;
 use crate::ops::cursor::{ContainerRef, FoldScratch};
 use crate::ops::analyze::plan::{plan_intersect, plan_trivial, Op};
 use crate::ops::source::Inputs;
 use crate::ops::run;
-use crate::simd;
+use crate::ops::simd;
 use crate::{FrozenBitmap, FrozenBitmapView};
 use super::common::*;
 

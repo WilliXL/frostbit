@@ -2,7 +2,7 @@
 //! (standard or inline) or a working arena. Shared by the analysis pass and the
 //! op kernels; mirrors the monorepo `ContainerIter`.
 
-use crate::container::Data;
+use crate::api::container::Data;
 use crate::format::*;
 use crate::ops::arena::OpArena;
 use crate::ops::keymask::KeyMask;
@@ -216,7 +216,7 @@ struct Buffers {
 
 mod scratch_pool {
     use super::Buffers;
-    use crate::pool::Pool;
+    use crate::api::pool::Pool;
 
     thread_local! {
         static POOL: Pool<Buffers> = const { Pool::new("fold-scratch") };

@@ -1,6 +1,6 @@
 //! Zero-copy reader over frozen bitmap bytes (e.g. an `mmap`).
 
-use crate::container::{Data, Run};
+use crate::api::container::{Data, Run};
 use crate::format::*;
 
 /// A frozen bitmap viewed directly from raw bytes — no deserialization.

@@ -2,8 +2,8 @@
 //!
 //! Each writes only into pre-sized arena slots (the arena's `record`
 //! debug-asserts the no-runtime-allocation invariant) and dispatches on the
-//! typed [`Data`](crate::container::Data) view, delegating the heavy lifting to
-//! [`crate::simd`].
+//! typed [`Data`](crate::api::container::Data) view, delegating the heavy lifting to
+//! [`super::simd`].
 
 mod common;
 mod difference;

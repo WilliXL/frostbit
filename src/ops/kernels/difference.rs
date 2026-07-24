@@ -1,13 +1,13 @@
 //! N-way difference (`inputs[0]` minus the rest).
 
-use crate::container::{Data, Run};
+use crate::api::container::{Data, Run};
 use crate::format::*;
 use crate::ops::arena::{OpArena, SlotState};
 use crate::ops::cursor::{ContainerRef, FoldScratch};
 use crate::ops::analyze::plan::{plan_diff, plan_trivial, Op};
 use crate::ops::source::Inputs;
 use crate::ops::run;
-use crate::simd;
+use crate::ops::simd;
 use crate::{FrozenBitmap, FrozenBitmapView};
 use super::common::*;
 

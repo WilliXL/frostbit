@@ -1,12 +1,12 @@
 //! Machinery every fold shares: the tiny-input gate, the key-major driver, the
 //! array/bitmap/run accumulators, and the slot load/store helpers.
 
-use crate::container::{as_bitmap_mut, Bitmap, Data, Run};
+use crate::api::container::{as_bitmap_mut, Bitmap, Data, Run};
 use crate::format::*;
 use crate::ops::arena::{OpArena, SlotState};
 use crate::ops::cursor::{ContainerRef, FoldScratch};
 use crate::ops::source::Inputs;
-use crate::simd;
+use crate::ops::simd;
 use crate::FrozenBitmapView;
 
 // --- key-major fold order (cache-heavy accumulator sets) ---------------------

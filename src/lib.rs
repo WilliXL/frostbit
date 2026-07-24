@@ -20,32 +20,19 @@ pub mod format;
 #[cfg(not(feature = "internals"))]
 mod format;
 
-mod bitmap;
-pub use bitmap::FrozenBitmap;
+mod api;
 
-pub mod pool;
+pub use api::bitmap::FrozenBitmap;
+pub use api::builder::FrozenBitmapBuilder;
+pub use api::expr::BitmapExpr;
+pub use api::view::{FrozenBitmapView, Iter};
+
+/// Working-memory budgeting, pre-allocation, and overflow policy.
+pub use api::pool;
 
 /// Container payload access. Public only under `internals`.
 #[cfg(feature = "internals")]
-pub mod container;
-#[cfg(not(feature = "internals"))]
-mod container;
-
-mod builder;
-pub use builder::FrozenBitmapBuilder;
-
-mod view;
-pub use view::{FrozenBitmapView, Iter};
-
-mod expr;
-pub use expr::BitmapExpr;
-
-/// SIMD container kernels. Public only under `internals`, for white-box
-/// kernel benchmarks.
-#[cfg(feature = "internals")]
-pub mod simd;
-#[cfg(not(feature = "internals"))]
-mod simd;
+pub use api::container;
 
 /// Set ops + their static analysis pass. The module is public only under
 /// `internals`; the stable entry points are re-exported below.
@@ -63,5 +50,3 @@ pub use ops::kernels::{
     union_fast,
 };
 
-#[cfg(feature = "roaring")]
-mod convert;

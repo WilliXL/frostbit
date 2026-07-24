@@ -14,8 +14,8 @@
 //! thread-local `pool`, so steady-state `intersect`/`union`/`diff` allocate only
 //! their result.
 
-use crate::bitmap::{aligned_buf, result_buf, AlignedBuf, FrozenBitmap};
-use crate::container::Data;
+use crate::api::bitmap::{aligned_buf, result_buf, AlignedBuf, FrozenBitmap};
+use crate::api::container::Data;
 use crate::format::*;
 use crate::ops::cursor::ContainerRef;
 use crate::ops::analyze::plan::Plan;
@@ -85,7 +85,7 @@ impl Reusable {
 /// nesting that the expression-tree evaluator introduces.
 mod pool {
     use super::Reusable;
-    use crate::pool::Pool;
+    use crate::api::pool::Pool;
 
     thread_local! {
         static POOL: Pool<Reusable> = const { Pool::new("arena") };

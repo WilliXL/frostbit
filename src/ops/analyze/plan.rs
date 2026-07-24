@@ -43,7 +43,7 @@ pub(crate) const SCRATCH_BYTES: usize = 2 * BITMAP_BYTES;
 
 mod slot_pool {
     use super::SlotPlan;
-    use crate::pool::Pool;
+    use crate::api::pool::Pool;
 
     thread_local! {
         static POOL: Pool<Vec<SlotPlan>> = const { Pool::new("slot-plan") };
