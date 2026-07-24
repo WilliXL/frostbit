@@ -87,6 +87,61 @@ pub fn run_ranges(keys: u16, nranges: u32, rlen: u32, phase: u32) -> Vec<u32> {
     sorted(v)
 }
 
+/// `per_key` random lows in each of `keys` containers starting at `k0` — the
+/// key-structure knob. Two bands that share no keys make a disjoint fold; a
+/// band nested inside another makes a containment fold.
+pub fn key_band(k0: u16, keys: u16, per_key: u32, st: &mut u64) -> Vec<u32> {
+    let mut v = Vec::new();
+    for k in k0..k0.saturating_add(keys) {
+        for _ in 0..per_key {
+            v.push(at(k, (splitmix64(st) % 65536) as u16));
+        }
+    }
+    sorted(v)
+}
+
+/// Thinly spread: `keys` containers of `per_key` values. With `per_key` tiny
+/// the builder picks the inline (FI) encoding — 4 bytes/value beats a whole
+/// container header — so this is how an operand comes back inline.
+pub fn thin(keys: u16, per_key: u32, phase: u32, st: &mut u64) -> Vec<u32> {
+    let mut v = Vec::new();
+    for k in 0..keys {
+        for _ in 0..per_key {
+            v.push(at(k, ((splitmix64(st) as u32).wrapping_add(phase) % 65536) as u16));
+        }
+    }
+    sorted(v)
+}
+
+/// `keys` containers of exactly `nruns` evenly spaced runs, each half the
+/// stride so the gaps never close and the count holds at any `phase`. Straddle
+/// `MAX_RUNS` with this to land either side of the run→bitmap decision.
+pub fn run_count(keys: u16, nruns: u32, phase: u32) -> Vec<u32> {
+    let stride = (65_536 / nruns).max(2);
+    let rlen = stride / 2;
+    let shift = phase % (stride - rlen);
+    let mut v = Vec::new();
+    for k in 0..keys {
+        for i in 0..nruns {
+            let start = i * stride + shift;
+            for lo in start..(start + rlen).min(65_536) {
+                v.push(at(k, lo as u16));
+            }
+        }
+    }
+    sorted(v)
+}
+
+/// `keys` fully saturated containers (all 65,536 lows) from `k0` — the one
+/// shape where every kernel's output is its input.
+pub fn full_keys(k0: u16, keys: u16) -> Vec<u32> {
+    let mut v = Vec::new();
+    for k in k0..k0.saturating_add(keys) {
+        v.extend((0..65_536u32).map(|lo| at(k, lo as u16)));
+    }
+    v
+}
+
 /// One workload in both representations.
 pub struct Set {
     pub fbs: Vec<FrozenBitmap>,

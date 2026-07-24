@@ -338,3 +338,12 @@ pub fn corpus_specs(n_trees: usize, pool_len: usize) -> Vec<Spec> {
     specs
 }
 
+
+/// Every leaf index in the tree, in visit order.
+pub fn collect_leaves(s: &Spec, out: &mut Vec<usize>) {
+    match s {
+        Spec::Leaf(i) => out.push(*i),
+        Spec::And(c) | Spec::Or(c) => c.iter().for_each(|x| collect_leaves(x, out)),
+        Spec::Diff(a, b) => { collect_leaves(a, out); collect_leaves(b, out); }
+    }
+}
