@@ -215,28 +215,27 @@ struct Buffers {
 }
 
 mod scratch_pool {
-    use std::cell::RefCell;
-
     use super::Buffers;
+    use crate::pool::Pool;
 
-    const MAX_POOLED: usize = 8;
     thread_local! {
-        static POOL: RefCell<Vec<Buffers>> = const { RefCell::new(Vec::new()) };
+        static POOL: Pool<Buffers> = const { Pool::new("fold-scratch") };
     }
 
     pub(super) fn take() -> Buffers {
-        POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default()
+        POOL.with(|p| p.take(Buffers::default))
     }
 
     pub(super) fn put(b: Buffers) {
-        POOL.with(|p| {
-            let mut p = p.borrow_mut();
-            if p.len() < MAX_POOLED {
-                p.push(b);
-            }
-        });
+        POOL.with(|p| p.put(b));
+    }
+
+    pub(crate) fn clear() {
+        POOL.with(Pool::clear);
     }
 }
+
+pub(crate) use scratch_pool::clear as clear_scratch_pool;
 
 /// Pooled scratch for driving a fold: a cursor buffer and a per-key ref buffer,
 /// reused across folds so a fold allocates nothing in steady state. The buffers

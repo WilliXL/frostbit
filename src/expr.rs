@@ -257,28 +257,27 @@ struct ExecStack {
 }
 
 mod stack_pool {
-    use std::cell::RefCell;
-
     use super::Acc;
+    use crate::pool::Pool;
 
-    const MAX_POOLED: usize = 8;
     thread_local! {
-        static POOL: RefCell<Vec<Vec<Acc<'static>>>> = const { RefCell::new(Vec::new()) };
+        static POOL: Pool<Vec<Acc<'static>>> = const { Pool::new("operand-stack") };
     }
 
     pub(super) fn take() -> Vec<Acc<'static>> {
-        POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default()
+        POOL.with(|p| p.take(Vec::new))
     }
 
     pub(super) fn put(v: Vec<Acc<'static>>) {
-        POOL.with(|p| {
-            let mut p = p.borrow_mut();
-            if p.len() < MAX_POOLED {
-                p.push(v);
-            }
-        });
+        POOL.with(|p| p.put(v));
+    }
+
+    pub(crate) fn clear() {
+        POOL.with(Pool::clear);
     }
 }
+
+pub(crate) use stack_pool::clear as clear_stack_pool;
 
 impl ExecStack {
     #[inline]

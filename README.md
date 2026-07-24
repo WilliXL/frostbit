@@ -132,15 +132,41 @@ let expr = BitmapExpr::and([
 let result = expr.materialize(); // reuse `expr` for repeated evaluation
 ```
 
-### Pre-allocation
+### Working memory
 
-Nothing to configure: every working buffer — op arenas, fold cursors, the
-operand stack, and result buffers — lives in **per-thread pools**. The first
+Nothing to configure by default: every working buffer — op arenas, fold cursors,
+the operand stack, and result buffers — lives in **per-thread pools**. The first
 call on a thread allocates (sized by the op's fold plan); after that, ops take,
 fill, and return the same buffers, and results serialize **in place** inside
 the arena, so a steady-state op or `materialize()` performs **zero mallocs**.
 Cold paths degrade gracefully: an empty pool just allocates once and the
 buffer joins the cycle.
+
+When you *do* want an explicit bound on that memory, `frostbit::pool` gives you
+one — a budget, pre-allocation, and a policy for what happens if a fold needs
+more than the budget:
+
+```rust
+use frostbit::pool::{self, OnOverflow, PoolConfig};
+
+pool::configure(PoolConfig::new().buffers(16).buffer_bytes(1 << 20));
+pool::prewarm();                       // allocate the budget now, not on first op
+
+// ...or give the buffers an explicit shape:
+pool::configure(PoolConfig::new().buffer_sizes([4 << 20, 1 << 20, 1 << 20]));
+
+// Over-budget folds allocate a temporary and drop it on release (default), or
+// fail loudly — useful as a budget assertion in CI:
+pool::configure(PoolConfig::new().buffers(4).on_overflow(OnOverflow::Fail));
+
+let s = pool::stats();                 // live / retained / retained_bytes / overflows
+pool::clear();                         // hand the memory back when a worker idles
+```
+
+Budgets are **per-thread**, so there is no contention and no shared state:
+total working memory is bounded by `threads × budget`. To use frostbit under a
+thread pool, configure and pre-warm in the worker-start hook — `rayon`'s
+`start_handler` or `tokio`'s `on_thread_start`.
 
 ### File layout
 

@@ -19,35 +19,40 @@ pub(crate) fn aligned_buf(cap: usize) -> AlignedBuf {
 /// (`materialize` / `*_fast` in a loop) reuses one aligned allocation — no malloc
 /// on the hot path once warm, matching the arena/cursor/stack scratch pools.
 mod result_pool {
-    use std::cell::RefCell;
-
     use super::{aligned_buf, AlignedBuf};
+    use crate::pool::Pool;
 
-    const MAX_POOLED: usize = 8;
     thread_local! {
-        static POOL: RefCell<Vec<AlignedBuf>> = const { RefCell::new(Vec::new()) };
+        static POOL: Pool<AlignedBuf> = const { Pool::cache("result") };
     }
 
     pub(super) fn take(cap: usize) -> AlignedBuf {
-        match POOL.with(|p| p.borrow_mut().pop()) {
-            Some(mut buf) => {
-                buf.clear();
-                buf.reserve(cap);
-                buf
-            }
-            None => aligned_buf(cap),
-        }
+        let mut buf = POOL.with(|p| p.take(|| aligned_buf(cap)));
+        buf.clear();
+        buf.reserve(cap);
+        buf
     }
 
     pub(super) fn put(buf: AlignedBuf) {
-        POOL.with(|p| {
-            let mut p = p.borrow_mut();
-            if p.len() < MAX_POOLED {
-                p.push(buf);
-            }
-        });
+        POOL.with(|p| p.put(buf));
+    }
+
+    pub(crate) fn prewarm(sizes: &[usize]) {
+        POOL.with(|p| p.prewarm(sizes, aligned_buf));
+    }
+
+    pub(crate) fn clear() {
+        POOL.with(Pool::clear);
+    }
+
+    pub(crate) fn stats() -> (usize, usize, usize) {
+        POOL.with(|p| p.stats(|b| b.capacity()))
     }
 }
+
+pub(crate) use result_pool::{
+    clear as clear_result_pool, prewarm as prewarm_result_pool, stats as result_pool_stats,
+};
 
 /// A result buffer from the per-thread pool, with `cap` bytes reserved.
 pub(crate) fn result_buf(cap: usize) -> AlignedBuf {

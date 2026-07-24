@@ -41,29 +41,28 @@ pub struct Plan {
 const SCRATCH_BYTES: usize = 2 * BITMAP_BYTES;
 
 mod slot_pool {
-    use std::cell::RefCell;
-
     use super::SlotPlan;
+    use crate::pool::Pool;
 
-    const MAX_POOLED: usize = 8;
     thread_local! {
-        static POOL: RefCell<Vec<Vec<SlotPlan>>> = const { RefCell::new(Vec::new()) };
+        static POOL: Pool<Vec<SlotPlan>> = const { Pool::new("slot-plan") };
     }
 
     pub(super) fn take() -> Vec<SlotPlan> {
-        POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default()
+        POOL.with(|p| p.take(Vec::new))
     }
 
     pub(super) fn put(mut v: Vec<SlotPlan>) {
         v.clear();
-        POOL.with(|p| {
-            let mut p = p.borrow_mut();
-            if p.len() < MAX_POOLED {
-                p.push(v);
-            }
-        });
+        POOL.with(|p| p.put(v));
+    }
+
+    pub(crate) fn clear() {
+        POOL.with(Pool::clear);
     }
 }
+
+pub(crate) use slot_pool::clear as clear_slot_pool;
 
 /// Return a one-shot plan's slot buffer to the per-thread pool. Tree plans
 /// live inside a `FoldPlan` and simply never call this.

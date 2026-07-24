@@ -23,6 +23,8 @@ mod format;
 mod bitmap;
 pub use bitmap::FrozenBitmap;
 
+pub mod pool;
+
 /// Container payload access. Public only under `internals`.
 #[cfg(feature = "internals")]
 pub mod container;
