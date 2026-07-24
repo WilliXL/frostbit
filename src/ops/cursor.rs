@@ -48,11 +48,13 @@ impl<'a> ContainerRef<'a> {
     }
 }
 
-/// What a cursor walks: a byte-encoded leaf or a working arena.
+/// What a cursor walks: a byte-encoded leaf (either encoding) or a working
+/// arena. `data_base` is where payloads start.
 enum Backing<'a> {
-    /// Standard (SoA index) when `!inline`, else inline (packed `u32`).
-    /// `data_base` is the payload/packed-region start.
-    Bytes { bytes: &'a [u8], inline: bool, data_base: usize },
+    /// Standard format, walked through the typed SoA index.
+    Standard { bytes: &'a [u8], index: Index<'a>, data_base: usize },
+    /// Inline format: one packed ascending `u32` per value, grouped by key.
+    Inline { bytes: &'a [u8] },
     /// An intermediate arena read back in record (key-ascending) order.
     Arena(&'a OpArena),
 }
@@ -70,11 +72,11 @@ impl<'a> ContainerCursor<'a> {
     pub fn new(view: &FrozenBitmapView<'a>) -> Self {
         let bytes = view.as_bytes();
         if let Some((n, data_base)) = view.standard_dims() {
-            Self { backing: Backing::Bytes { bytes, inline: false, data_base }, n, pos: 0, live: None }
+            let index = Index::new(bytes, n);
+            Self { backing: Backing::Standard { bytes, index, data_base }, n, pos: 0, live: None }
         } else {
             let count = view.inline_count().unwrap_or(0);
-            let data_base = INLINE_HEADER_SIZE;
-            Self { backing: Backing::Bytes { bytes, inline: true, data_base }, n: count, pos: 0, live: None }
+            Self { backing: Backing::Inline { bytes }, n: count, pos: 0, live: None }
         }
     }
 
@@ -102,29 +104,27 @@ impl<'a> ContainerCursor<'a> {
     /// An exhausted cursor (yields nothing) — a short-circuited empty operand.
     #[inline]
     pub fn empty() -> Self {
-        Self { backing: Backing::Bytes { bytes: &[], inline: false, data_base: 0 }, n: 0, pos: 0, live: None }
+        Self { backing: Backing::Inline { bytes: &[] }, n: 0, pos: 0, live: None }
     }
 
     /// Key of the current container, or `None` when exhausted.
     #[inline]
     pub fn peek_key(&self) -> Option<u16> {
-        if self.pos >= self.n {
-            return None;
+        match &self.backing {
+            // One load, and the slice bound is the exhaustion check.
+            Backing::Standard { index, .. } => index.key(self.pos),
+            Backing::Inline { bytes } => (self.pos < self.n)
+                .then(|| (read_u32(bytes, INLINE_HEADER_SIZE + self.pos * 4) >> 16) as u16),
+            Backing::Arena(a) => (self.pos < self.n).then(|| a.container_key(self.pos)),
         }
-        Some(match &self.backing {
-            Backing::Bytes { bytes, inline: true, data_base } => {
-                (read_u32(bytes, data_base + self.pos * 4) >> 16) as u16
-            }
-            Backing::Bytes { bytes, inline: false, .. } => read_key(bytes, self.n, self.pos),
-            Backing::Arena(a) => a.container_key(self.pos),
-        })
     }
 
     /// Current container without advancing.
     pub fn get(&self) -> ContainerRef<'a> {
         debug_assert!(self.pos < self.n);
         match &self.backing {
-            Backing::Bytes { bytes, inline: true, data_base } => {
+            Backing::Inline { bytes } => {
+                let data_base = INLINE_HEADER_SIZE;
                 let key = (read_u32(bytes, data_base + self.pos * 4) >> 16) as u16;
                 let mut end = self.pos + 1;
                 while end < self.n && (read_u32(bytes, data_base + end * 4) >> 16) as u16 == key {
@@ -137,8 +137,8 @@ impl<'a> ContainerCursor<'a> {
                     data: &bytes[data_base + self.pos * 4..data_base + end * 4],
                 }
             }
-            Backing::Bytes { bytes, inline: false, data_base } => {
-                let e = read_index_entry(bytes, self.n, self.pos);
+            Backing::Standard { bytes, index, data_base } => {
+                let e = index.entry(self.pos);
                 let start = data_base + e.data_offset as usize;
                 let size = match e.typ {
                     CT_ARRAY => e.cardinality as usize * 2,
@@ -163,10 +163,10 @@ impl<'a> ContainerCursor<'a> {
 
     /// Advance past the current container (ignoring the live mask).
     fn advance_raw(&mut self) {
-        if let Backing::Bytes { bytes, inline: true, data_base } = &self.backing {
+        if let Backing::Inline { bytes } = &self.backing {
             let Some(key) = self.peek_key() else { return };
             while self.pos < self.n
-                && (read_u32(bytes, data_base + self.pos * 4) >> 16) as u16 == key
+                && (read_u32(bytes, INLINE_HEADER_SIZE + self.pos * 4) >> 16) as u16 == key
             {
                 self.pos += 1;
             }

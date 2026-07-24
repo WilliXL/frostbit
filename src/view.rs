@@ -231,10 +231,11 @@ impl<'a> FrozenBitmapView<'a> {
         match self.repr {
             Repr::Inline { count } => inline_contains(self.bytes, count, value),
             Repr::Standard { n, data_base } => {
-                let Some(i) = find_container(self.bytes, n, (value >> 16) as u16) else {
+                let index = Index::new(self.bytes, n);
+                let Some(i) = index.find((value >> 16) as u16) else {
                     return false;
                 };
-                let e = read_index_entry(self.bytes, n, i);
+                let e = index.entry(i);
                 let start = data_base + e.data_offset as usize;
                 // `Data::new` slices exactly the payload it needs out of the
                 // tail, so the probe runs over the typed container.

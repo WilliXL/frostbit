@@ -241,13 +241,13 @@ fn find_container_hits_and_misses() {
     let entries = sample_entries(); // keys: 0, 5, 200, 65535
     let n = entries.len();
     let buf = build_index(&entries);
-    assert_eq!(find_container(&buf, n, 0), Some(0));
-    assert_eq!(find_container(&buf, n, 5), Some(1));
-    assert_eq!(find_container(&buf, n, 200), Some(2));
-    assert_eq!(find_container(&buf, n, 65_535), Some(3));
+    assert_eq!(Index::new(&buf, n).find(0), Some(0));
+    assert_eq!(Index::new(&buf, n).find(5), Some(1));
+    assert_eq!(Index::new(&buf, n).find(200), Some(2));
+    assert_eq!(Index::new(&buf, n).find(65_535), Some(3));
     for missing in [1u16, 4, 6, 199, 201, 65_534] {
-        assert_eq!(find_container(&buf, n, missing), None, "found absent key {missing}");
+        assert_eq!(Index::new(&buf, n).find(missing), None, "found absent key {missing}");
     }
     // Empty index.
-    assert_eq!(find_container(&buf, 0, 0), None);
+    assert_eq!(Index::new(&buf, 0).find(0), None);
 }

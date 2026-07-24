@@ -273,11 +273,56 @@ pub struct IndexEntry {
     pub data_offset: u32,
 }
 
-/// Read the key of container `i` (the only field a search needs).
-#[inline(always)]
-pub fn read_key(bytes: &[u8], n: usize, i: usize) -> u16 {
-    debug_assert!(i < n);
-    read_u16(bytes, keys_off() + i * 2)
+/// The container index borrowed as its three typed sub-arrays.
+///
+/// The SoA layout exists so a walk touches one field at a time; reading it as
+/// real slices means each visit is one load per field instead of assembling
+/// bytes. Every sub-array is correctly aligned for its element type whenever the
+/// buffer base is (`keys` at +16, `cards` 2-aligned, `type_offsets` 4-aligned),
+/// which is checked when untrusted bytes are parsed.
+#[derive(Clone, Copy)]
+pub struct Index<'a> {
+    keys: &'a [u16],
+    cards: &'a [u16],
+    type_offsets: &'a [u32],
+}
+
+impl<'a> Index<'a> {
+    /// Borrow the index of an `n`-container standard bitmap.
+    #[inline]
+    pub fn new(bytes: &'a [u8], n: usize) -> Self {
+        Index {
+            keys: bytemuck::cast_slice(&bytes[keys_off()..keys_off() + 2 * n]),
+            cards: bytemuck::cast_slice(&bytes[cards_off(n)..cards_off(n) + 2 * n]),
+            type_offsets: bytemuck::cast_slice(
+                &bytes[type_offsets_off(n)..type_offsets_off(n) + 4 * n],
+            ),
+        }
+    }
+
+    /// Key of container `i`, or `None` past the end.
+    #[inline]
+    pub fn key(&self, i: usize) -> Option<u16> {
+        self.keys.get(i).copied()
+    }
+
+    /// Position of the container holding `key`, or `None` if absent.
+    #[inline]
+    pub fn find(&self, key: u16) -> Option<usize> {
+        self.keys.binary_search(&key).ok()
+    }
+
+    /// Decoded entry `i`.
+    #[inline]
+    pub fn entry(&self, i: usize) -> IndexEntry {
+        let to = self.type_offsets[i];
+        IndexEntry {
+            key: self.keys[i],
+            typ: (to >> E_TYPE_SHIFT) as u8,
+            cardinality: self.cards[i] as u32 + 1,
+            data_offset: to & E_OFFSET_MASK,
+        }
+    }
 }
 
 #[inline]
@@ -304,13 +349,3 @@ pub fn write_index_entry(buf: &mut [u8], n: usize, i: usize, e: IndexEntry) {
     write_u32(buf, type_offsets_off(n) + i * 4, to);
 }
 
-/// Binary-search the `keys` sub-array for `key`. Keys are ascending.
-///
-/// Searches the keys as a real `&[u16]` — the index sits at a fixed offset from
-/// a base whose alignment is checked when the bytes are parsed, so each probe is
-/// one load instead of a byte-pair assembly.
-#[inline]
-pub fn find_container(bytes: &[u8], n: usize, key: u16) -> Option<usize> {
-    let keys: &[u16] = bytemuck::cast_slice(&bytes[keys_off()..keys_off() + 2 * n]);
-    keys.binary_search(&key).ok()
-}
