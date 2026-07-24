@@ -44,6 +44,16 @@ fn corpus(c: &mut Criterion) {
             }
         })
     });
+    // Analysis alone: construct every tree (which *is* the analysis pass) and
+    // drop it without materializing. The gap to `25k_trees/frostbit` is what
+    // execution costs, so these two together say where corpus time goes.
+    g.bench_function("25k_trees/frostbit_analyze", |b| {
+        b.iter(|| {
+            for spec in &specs {
+                black_box(build_fb(spec, &pool));
+            }
+        })
+    });
     g.bench_function(format!("25k_trees/{RB}"), |b| {
         b.iter(|| {
             for spec in &specs {
