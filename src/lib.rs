@@ -7,6 +7,12 @@
 //! Op producers come in two intents: `_fast` (op-ready, for query pipelines)
 //! and `_compact` (smallest, for persistence). The builder always finishes
 //! compact — built bitmaps are destined for storage.
+//!
+//! **Fallibility.** Only one thing can fail: validating untrusted bytes, which
+//! returns `Option` ([`FrozenBitmapView::from_bytes`] / [`FrozenBitmap::from_bytes`]).
+//! Feeding the builder out-of-order values is a programmer error and panics
+//! ([`FrozenBitmapBuilder::push`]). Everything else — set ops,
+//! [`BitmapExpr::materialize`], and all queries on a valid bitmap — is infallible.
 
 /// Wire-format constants and byte primitives. Public only under `internals`.
 #[cfg(feature = "internals")]
