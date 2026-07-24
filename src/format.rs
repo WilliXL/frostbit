@@ -62,6 +62,12 @@ pub const ARRAY_MAX_SIZE: usize = 4096;
 /// Max runs that fit a run payload before it's larger than a bitmap.
 pub const MAX_RUNS: usize = (BITMAP_BYTES - 2) / 4;
 
+/// Stored size of a run container: a `u16` count then `nr` `(start, len)` pairs.
+#[inline(always)]
+pub const fn run_bytes(nr: usize) -> usize {
+    2 + nr * 4
+}
+
 const _: () = assert!(BITMAP_BYTES == 8192);
 
 // --- Alignment -------------------------------------------------------------

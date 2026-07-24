@@ -1,5 +1,6 @@
 //! Zero-copy reader over frozen bitmap bytes (e.g. an `mmap`).
 
+use crate::container::Run;
 use crate::format::*;
 
 /// A frozen bitmap viewed directly from raw bytes — no deserialization.
@@ -116,7 +117,7 @@ impl<'a> FrozenBitmapView<'a> {
             // cardinalities that match the payload. Without this the type is
             // "structurally valid" only, and corrupt-but-well-sized bytes turn
             // into wrong answers, panics, or (in the merge kernels) OOB writes.
-            if !payload_is_valid(bytes, e.typ, e.cardinality, start) {
+            if !payload_is_valid(&bytes[start..start + size], e.typ, e.cardinality) {
                 return None;
             }
         }
@@ -527,43 +528,42 @@ fn run_contains(bytes: &[u8], start: usize, lo16: u16) -> bool {
 ///
 /// Only called from [`FrozenBitmapView::from_bytes`] (the untrusted boundary);
 /// the trusted path skips it, so frostbit-produced bitmaps pay nothing.
-fn payload_is_valid(bytes: &[u8], typ: u8, card: u32, start: usize) -> bool {
+/// Reading through the typed slice (rather than byte-at-a-time) keeps this
+/// linear-in-payload pass vectorizable, and the cast doubles as the alignment
+/// check the kernels' own zero-copy casts (`Data::new`) depend on: a payload
+/// that would fault there is rejected here instead.
+fn payload_is_valid(payload: &[u8], typ: u8, card: u32) -> bool {
     match typ {
         CT_ARRAY => {
-            let mut prev: Option<u16> = None;
-            for j in 0..card as usize {
-                let v = read_u16(bytes, start + j * 2);
-                if prev.is_some_and(|p| v <= p) {
-                    return false;
-                }
-                prev = Some(v);
-            }
-            true
+            let Ok(vals) = bytemuck::try_cast_slice::<u8, u16>(payload) else {
+                return false;
+            };
+            vals.windows(2).all(|w| w[0] < w[1])
         }
         CT_BITMAP => {
-            let mut pop = 0u32;
-            for w in 0..BITMAP_WORDS {
-                pop += read_u64(bytes, start + w * 8).count_ones();
-            }
-            pop == card
+            let Ok(words) = bytemuck::try_cast_slice::<u8, u64>(payload) else {
+                return false;
+            };
+            words.iter().map(|w| w.count_ones()).sum::<u32>() == card
         }
         CT_RUN => {
-            let nr = read_u16(bytes, start) as usize;
             // A canonical run container has 1..=MAX_RUNS runs (more would have
             // been stored as a bitmap). Rejecting the rest also keeps the
             // planner's "slot capacity ≤ BITMAP_BYTES" invariant intact (SAFE-11).
-            if nr == 0 || nr > MAX_RUNS {
+            let nr = read_u16(payload, 0) as usize;
+            if nr == 0 || nr > MAX_RUNS || payload.len() != run_bytes(nr) {
                 return false;
             }
+            let Ok(runs) = bytemuck::try_cast_slice::<u8, Run>(&payload[2..]) else {
+                return false;
+            };
             let (mut total, mut prev_end): (u32, Option<u32>) = (0, None);
-            for r in 0..nr {
-                let off = start + 2 + r * 4;
-                let s = read_u16(bytes, off) as u32;
-                let len = read_u16(bytes, off + 2) as u32;
-                let end = s + len;
+            for r in runs {
+                let (start, len) = (r.start as u32, r.len as u32);
+                let end = start + len;
                 // In range (no u16 wrap) and strictly past the previous run's
                 // end (ascending, non-overlapping — adjacency is allowed).
-                if end > 0xFFFF || prev_end.is_some_and(|pe| s <= pe) {
+                if end > 0xFFFF || prev_end.is_some_and(|pe| start <= pe) {
                     return false;
                 }
                 total += len + 1;
