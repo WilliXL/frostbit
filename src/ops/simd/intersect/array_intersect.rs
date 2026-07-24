@@ -126,12 +126,16 @@ unsafe fn intersect_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
             k += (bits as u32).count_ones() as usize;
         } else {
             let mut b = bits as u32;
-            // Bound the tail against `out.len()`. On sorted-unique inputs the
-            // total match count is ≤ out.len(), so this never truncates a valid
-            // result; it prevents an out-of-bounds write if the merge is ever
-            // handed unsorted/duplicate data (defense-in-depth behind the
-            // sortedness validation in `FrozenBitmapView::from_bytes`).
-            while b != 0 && k < out.len() {
+            // No bound here: `out` is sized to min(|a|, |b|) and, on
+            // sorted-unique inputs, each `a` lane matches in exactly one `b`
+            // block, so the total emitted is <= out.len(). Sortedness is
+            // guaranteed by construction (the builder rejects a non-ascending
+            // push) and re-established once at the trust boundary
+            // (`FrozenBitmapView::from_bytes` validates array monotonicity), so
+            // a fold never observes unsorted input. The debug assert keeps that
+            // contract honest in tests without costing the hot loop anything.
+            debug_assert!(k + bits.count_ones() as usize <= out.len(), "intersect merge overran its slot");
+            while b != 0 {
                 let i = b.trailing_zeros() as usize;
                 *out.get_unchecked_mut(k) = *a.get_unchecked(ia + i);
                 k += 1;
@@ -262,12 +266,16 @@ unsafe fn intersect_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
             k += (bits as u32).count_ones() as usize;
         } else {
             let mut b = bits as u32;
-            // Bound the tail against `out.len()`. On sorted-unique inputs the
-            // total match count is ≤ out.len(), so this never truncates a valid
-            // result; it prevents an out-of-bounds write if the merge is ever
-            // handed unsorted/duplicate data (defense-in-depth behind the
-            // sortedness validation in `FrozenBitmapView::from_bytes`).
-            while b != 0 && k < out.len() {
+            // No bound here: `out` is sized to min(|a|, |b|) and, on
+            // sorted-unique inputs, each `a` lane matches in exactly one `b`
+            // block, so the total emitted is <= out.len(). Sortedness is
+            // guaranteed by construction (the builder rejects a non-ascending
+            // push) and re-established once at the trust boundary
+            // (`FrozenBitmapView::from_bytes` validates array monotonicity), so
+            // a fold never observes unsorted input. The debug assert keeps that
+            // contract honest in tests without costing the hot loop anything.
+            debug_assert!(k + bits.count_ones() as usize <= out.len(), "intersect merge overran its slot");
+            while b != 0 {
                 let i = b.trailing_zeros() as usize;
                 *out.get_unchecked_mut(k) = *a.get_unchecked(ia + i);
                 k += 1;

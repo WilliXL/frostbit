@@ -499,7 +499,59 @@ fn stages(c: &mut Criterion) {
     g.bench_function("load_array/from_bitmap4000", |b| {
         b.iter(|| black_box(accum::load_array(&mut slot, Data::Bitmap(bm))))
     });
+    // Run container -> sorted u16 array (the other extraction path).
+    g.bench_function("load_array/from_run64", |b| {
+        b.iter(|| black_box(accum::load_array(&mut slot, Data::Run(&ra))))
+    });
+    // Accumulator conversions: array -> bitmap and run -> bitmap scatter.
+    let vals: Vec<u16> = (0..4000u16).map(|i| i * 16).collect();
+    let mut acc_bm = vec![0u8; 8192];
+    g.bench_function("set_values/4000", |b| {
+        b.iter(|| {
+            let d = frostbit::container::as_bitmap_mut(&mut acc_bm);
+            frostbit::ops::simd::clear(d);
+            frostbit::ops::simd::set_values(d, &vals);
+        })
+    });
+    g.bench_function("set_runs/64", |b| {
+        b.iter(|| {
+            let d = frostbit::container::as_bitmap_mut(&mut acc_bm);
+            frostbit::ops::simd::clear(d);
+            frostbit::ops::simd::set_runs(d, &ra);
+        })
+    });
     g.finish();
+
+    // Serialize / in-place compaction: fold into an arena, then emit bytes.
+    // `into` is the fold alone; `into_serialize` adds the compaction pass.
+    let mut st = 0x5E21_A11D_u64;
+    let set = Set::new(&(0..8).map(|_| arrays(32, 800, &mut st)).collect::<Vec<_>>());
+    let fv = set.views(8);
+    let mut s = c.benchmark_group("stage");
+    s.bench_function("arena_fold/and8", |b| {
+        b.iter(|| black_box(frostbit::ops::kernels::intersect_into(&fv)))
+    });
+    s.bench_function("arena_fold_serialize/and8", |b| {
+        b.iter(|| black_box(intersect_fast(&fv)))
+    });
+    s.finish();
+
+    // The ceiling itself: memcpy-class throughput at L1, L2 and DRAM sizes, so
+    // "memory bound" can be judged against a measured plateau rather than an
+    // assumption about which cache a stage lives in.
+    let mut ceil = c.benchmark_group("ceiling");
+    for (name, n) in [("copy_8k", 8 << 10), ("copy_256k", 256 << 10), ("copy_8m", 8 << 20)] {
+        let src = vec![0xA5u8; n];
+        let mut dst = vec![0u8; n];
+        ceil.throughput(criterion::Throughput::Bytes(2 * n as u64));
+        ceil.bench_function(name, |b| {
+            b.iter(|| {
+                dst.copy_from_slice(black_box(&src));
+                black_box(&dst[0]);
+            })
+        });
+    }
+    ceil.finish();
 }
 #[cfg(not(feature = "internals"))]
 fn stages(_c: &mut Criterion) {}
