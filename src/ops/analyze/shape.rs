@@ -24,14 +24,22 @@ pub struct Meta {
 }
 
 impl Meta {
-    /// Bytes this container occupies as a stored payload (parent sizing).
+    /// Bytes a parent must reserve to hold this container.
+    ///
+    /// This is `cap` — the ceiling already proven for *this* node's own slot —
+    /// and deliberately not a size derived from `typ`. `typ` is the form the
+    /// analyzer *expects* the kernel to build; the kernel is free to build
+    /// another (a run accumulator that outgrows `MAX_RUNS` becomes a bitmap, a
+    /// sparse bitmap is demoted to an array). Sizing a parent slot from the
+    /// predicted form is therefore unsound: a 2-run prediction reserves 10
+    /// bytes, and the kernel then hands `diff_seed` a bitmap needing 8192.
+    ///
+    /// Reading it off `cap` cannot go wrong by construction: whatever the
+    /// kernel builds fits in this node's slot, so it fits in a parent slot of
+    /// the same size, without the parent having to predict which form it is.
     #[inline]
     fn stored(&self) -> u32 {
-        match self.typ {
-            CT_BITMAP => BITMAP_BYTES as u32,
-            CT_RUN => run_bytes(self.runs as usize) as u32,
-            _ => self.card * 2,
-        }
+        self.cap
     }
 }
 

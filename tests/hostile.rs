@@ -140,3 +140,35 @@ mod hostile {
         assert_eq!(copy.view().len(), bm.view().len());
     }
 }
+
+/// A parent must size a slot from its child's *proven ceiling*, never from the
+/// container form the analyzer predicted — the kernel is free to build another.
+///
+/// Minimized from the 50k corpus. The inner DIFF is predicted to leave a 2-run
+/// container (10 bytes), so the outer DIFF reserved 10 bytes for that key; the
+/// kernel then handed `diff_seed` a form needing a full 8 KiB bitmap and it
+/// sliced `[..BITMAP_BYTES]` out of a 10-byte slot. Release crash, not caught
+/// by any hand-written shape.
+#[test]
+fn parent_slot_holds_whatever_form_the_child_builds() {
+    use frostbit::BitmapExpr;
+    // Dense run containers, card > 4096, one run per key.
+    let runs = build(&(0..12u32).flat_map(|k| (0..20_000u32).map(move |v| (k << 16) | v)).collect::<Vec<_>>());
+    // One value per key: splits each run, so the child is predicted as runs.
+    let points = build(&(0..24u32).map(|v| (v << 16) | (v * 101)).collect::<Vec<_>>());
+    // A single full 64K container, overlapping only the first key.
+    let full = build(&(0..65_536u32).collect::<Vec<_>>());
+
+    let expr = BitmapExpr::difference(
+        BitmapExpr::difference(BitmapExpr::leaf(runs.view()), BitmapExpr::leaf(points.view())),
+        BitmapExpr::leaf(full.view()),
+    );
+    let got: Vec<u32> = expr.materialize().iter().collect();
+
+    use std::collections::BTreeSet;
+    let (a, b): (BTreeSet<u32>, BTreeSet<u32>) = (runs.iter().collect(), points.iter().collect());
+    let c: BTreeSet<u32> = full.iter().collect();
+    let want: Vec<u32> = a.iter().copied().filter(|v| !b.contains(v) && !c.contains(v)).collect();
+    assert_eq!(got, want);
+}
+
