@@ -1,6 +1,6 @@
 //! Zero-copy reader over frozen bitmap bytes (e.g. an `mmap`).
 
-use crate::container::Run;
+use crate::container::{Data, Run};
 use crate::format::*;
 
 /// A frozen bitmap viewed directly from raw bytes — no deserialization.
@@ -235,17 +235,10 @@ impl<'a> FrozenBitmapView<'a> {
                     return false;
                 };
                 let e = read_index_entry(self.bytes, n, i);
-                let lo = value as u16;
                 let start = data_base + e.data_offset as usize;
-                match e.typ {
-                    CT_ARRAY => array_contains(self.bytes, start, e.cardinality as usize, lo),
-                    CT_BITMAP => {
-                        let w = read_u64(self.bytes, start + (lo as usize / 64) * 8);
-                        (w >> (lo as usize % 64)) & 1 == 1
-                    }
-                    CT_RUN => run_contains(self.bytes, start, lo),
-                    _ => false,
-                }
+                // `Data::new` slices exactly the payload it needs out of the
+                // tail, so the probe runs over the typed container.
+                Data::new(e.typ, e.cardinality, &self.bytes[start..]).contains(value as u16)
             }
         }
     }
@@ -474,49 +467,12 @@ impl PartialEq for FrozenBitmapView<'_> {
 }
 impl Eq for FrozenBitmapView<'_> {}
 
+/// Inline values are packed ascending `u32`s — search them as such (the base is
+/// alignment-checked at parse, so the cast is free).
 fn inline_contains(bytes: &[u8], count: usize, value: u32) -> bool {
-    let (mut lo, mut hi) = (0usize, count);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        match read_u32(bytes, INLINE_HEADER_SIZE + mid * 4).cmp(&value) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => return true,
-        }
-    }
-    false
-}
-
-fn array_contains(bytes: &[u8], start: usize, card: usize, lo16: u16) -> bool {
-    let (mut lo, mut hi) = (0usize, card);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        match read_u16(bytes, start + mid * 2).cmp(&lo16) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => return true,
-        }
-    }
-    false
-}
-
-fn run_contains(bytes: &[u8], start: usize, lo16: u16) -> bool {
-    let nr = read_u16(bytes, start) as usize;
-    let v = lo16 as u32;
-    let (mut lo, mut hi) = (0usize, nr);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let s = read_u16(bytes, start + 2 + mid * 4) as u32;
-        let e = s + read_u16(bytes, start + 2 + mid * 4 + 2) as u32;
-        if v < s {
-            hi = mid;
-        } else if v > e {
-            lo = mid + 1;
-        } else {
-            return true;
-        }
-    }
-    false
+    let vals: &[u32] =
+        bytemuck::cast_slice(&bytes[INLINE_HEADER_SIZE..INLINE_HEADER_SIZE + 4 * count]);
+    vals.binary_search(&value).is_ok()
 }
 
 /// Validate one container's payload *content*, given its bytes are already known

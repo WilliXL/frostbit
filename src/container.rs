@@ -56,6 +56,27 @@ impl<'a> Data<'a> {
         }
     }
 
+    /// Whether `lo` (a container-local low 16 bits) is present.
+    ///
+    /// Probes the typed payload directly — one branch on the container form,
+    /// then a binary search / bit test over a real slice. Callers that test
+    /// *many* values against one container should hoist the match instead (see
+    /// `retain_bitmap`), but for a single probe this is the fast path.
+    #[inline]
+    pub fn contains(&self, lo: u16) -> bool {
+        match self {
+            Data::Array(a) => a.binary_search(&lo).is_ok(),
+            Data::Bitmap(b) => (b[lo as usize / 64] >> (lo % 64)) & 1 == 1,
+            Data::Run(runs) => {
+                // Runs are sorted by start; the last one starting at or before
+                // `lo` is the only one that can contain it.
+                let i = runs.partition_point(|r| r.start <= lo);
+                i > 0 && lo <= runs[i - 1].end()
+            }
+            Data::Inline(ids) => ids.binary_search_by(|v| (*v as u16).cmp(&lo)).is_ok(),
+        }
+    }
+
     /// Write every low 16 bits, ascending, into `out`; returns the count.
     #[inline]
     pub fn write_sorted(&self, out: &mut [u16]) -> usize {

@@ -305,16 +305,12 @@ pub fn write_index_entry(buf: &mut [u8], n: usize, i: usize, e: IndexEntry) {
 }
 
 /// Binary-search the `keys` sub-array for `key`. Keys are ascending.
+///
+/// Searches the keys as a real `&[u16]` — the index sits at a fixed offset from
+/// a base whose alignment is checked when the bytes are parsed, so each probe is
+/// one load instead of a byte-pair assembly.
 #[inline]
 pub fn find_container(bytes: &[u8], n: usize, key: u16) -> Option<usize> {
-    let (mut lo, mut hi) = (0usize, n);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        match read_key(bytes, n, mid).cmp(&key) {
-            std::cmp::Ordering::Less => lo = mid + 1,
-            std::cmp::Ordering::Greater => hi = mid,
-            std::cmp::Ordering::Equal => return Some(mid),
-        }
-    }
-    None
+    let keys: &[u16] = bytemuck::cast_slice(&bytes[keys_off()..keys_off() + 2 * n]);
+    keys.binary_search(&key).ok()
 }
