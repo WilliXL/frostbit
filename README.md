@@ -37,10 +37,10 @@ assert_eq!(v.len(), 3);
   and evaluates them from a fold plan built **once** at construction: same-op
   chains flatten to one N-way op, intermediates chain as pooled arenas
   (serialized only at the end), and a `materialize` allocates *only its result*.
-  **Hole-punching** prunes dead 64K blocks before folding — derived
-  automatically whenever the tree's root provably narrows a child
-  (`punch_holes()` forces it) — and an empty AND/DIFF subtree
-  **short-circuits** the rest of the tree.
+  **Hole-punching** prunes dead 64K blocks before folding — the analyzer
+  derives it automatically, as part of the fold plan, whenever the tree's root
+  provably narrows a child — and an empty AND/DIFF subtree **short-circuits**
+  the rest of the tree.
 - **SIMD container kernels** (NEON on aarch64; SSE2 / SSSE3 / SSE4.1 / AVX2 /
   AVX-512 on x86-64, feature-detected; scalar fallbacks) plus autovectorized
   word operations.
@@ -124,8 +124,7 @@ let expr = BitmapExpr::and([
     BitmapExpr::leaf(base.view()),
     BitmapExpr::or([BitmapExpr::leaf(d0.view()), BitmapExpr::leaf(d1.view())]),
     BitmapExpr::difference(BitmapExpr::leaf(all.view()), BitmapExpr::leaf(lang.view())),
-])
-.punch_holes();                  // automatic for narrowing ANDs; this forces it
+]); // hole-punching for narrowing ANDs is automatic — part of the fold plan
 
 let result = expr.materialize(); // reuse `expr` for repeated evaluation
 ```
@@ -238,7 +237,7 @@ diff-heavy filters; 100 trees are guaranteed 100-leaf *and* 15-deep;
 
 | | frostbit | roaring |
 |---|---:|---:|
-| **Hole-punching** — narrow filter ∩ wide OR-groups | **7.4 µs** *(241 µs un-punched)* | 1.42 ms |
+| **Hole-punching** — narrow filter ∩ wide OR-groups | **7.4 µs** *(auto; ~240 µs of dead-block work skipped)* | 1.42 ms |
 | **Short-circuit** — AND with an empty subtree | **147 ns** | 705 µs |
 
 **N-way flat ops (8-way):**

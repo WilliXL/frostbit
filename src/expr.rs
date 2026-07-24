@@ -55,8 +55,9 @@ struct FoldPlan<'a> {
     steps: Vec<Step<'a>>,
     shape: Shape,
     max_depth: usize,
-    /// Hole-punch mask (set by [`BitmapExpr::punch_holes`]): the root's surviving
-    /// container keys, applied to every leaf cursor so dead blocks are skipped.
+    /// Hole-punch mask, auto-derived by [`combine`](Self::combine) whenever a
+    /// root AND narrows: the surviving container keys, applied to every leaf
+    /// cursor so dead 64K blocks are skipped before folding.
     live: Option<Arc<KeyMask>>,
 }
 
@@ -79,39 +80,32 @@ enum Node<'a> {
 }
 
 impl<'a> BitmapExpr<'a> {
+    /// A zero-copy leaf borrowing a view.
     pub fn leaf(view: FrozenBitmapView<'a>) -> Self {
         BitmapExpr(Node::Leaf(view))
     }
+
+    /// A shared owned leaf. For a single-use owned bitmap prefer
+    /// `BitmapExpr::from(bm)`; this `Arc` form is for cheap sharing across trees.
     pub fn owned(bm: Arc<FrozenBitmap>) -> Self {
         BitmapExpr(Node::Owned(bm))
     }
+
+    /// Intersection (AND) of the children, flattening nested ANDs into one N-way
+    /// op. Degenerate inputs: `and([])` is the empty set and `and([x])` is `x`.
     pub fn and(children: impl IntoIterator<Item = BitmapExpr<'a>>) -> Self {
         BitmapExpr(Node::Combined(FoldPlan::combine(Op::And, children)))
     }
+
+    /// Union (OR) of the children, flattening nested ORs into one N-way op.
+    /// Degenerate inputs: `or([])` is the empty set and `or([x])` is `x`.
     pub fn or(children: impl IntoIterator<Item = BitmapExpr<'a>>) -> Self {
         BitmapExpr(Node::Combined(FoldPlan::combine(Op::Or, children)))
     }
+
+    /// Difference: `lhs` minus `rhs`. Never flattened — DIFF is not associative.
     pub fn difference(lhs: BitmapExpr<'a>, rhs: BitmapExpr<'a>) -> Self {
         BitmapExpr(Node::Combined(FoldPlan::diff(lhs, rhs)))
-    }
-
-    /// Enable hole-punching. When this is a root intersection (AND of ≥2
-    /// operands), derive the surviving container-key set and prune every leaf
-    /// cursor to it — dead 64K blocks are skipped before any fold, so an
-    /// `AND(narrow, OR(wide…))` never materializes the wide branch's dead
-    /// blocks. A no-op for any other shape, where no key set narrows.
-    pub fn punch_holes(self) -> Self {
-        match self.0 {
-            Node::Combined(mut fp) if fp.is_and_root() => {
-                let mut mask = KeyMask::empty();
-                for m in &fp.shape {
-                    mask.set(m.key);
-                }
-                fp.live = Some(Arc::new(mask));
-                BitmapExpr(Node::Combined(fp))
-            }
-            other => BitmapExpr(other),
-        }
     }
 
     /// Evaluate the tree into one [`FrozenBitmap`].
@@ -134,18 +128,15 @@ impl<'a> From<Arc<FrozenBitmap>> for BitmapExpr<'a> {
         BitmapExpr(Node::Owned(b))
     }
 }
+impl<'a> From<FrozenBitmap> for BitmapExpr<'a> {
+    /// Place an owned bitmap in a tree by value (wrapped in an `Arc` internally),
+    /// so single-use owned leaves don't need an explicit `Arc::new`.
+    fn from(bm: FrozenBitmap) -> Self {
+        BitmapExpr(Node::Owned(Arc::new(bm)))
+    }
+}
 
 impl<'a> FoldPlan<'a> {
-    /// True when the root fold is an intersection of ≥2 operands — the only
-    /// shape whose key set narrows what its branches can contribute (a union or
-    /// lone leaf spans all its leaves' keys, so a mask would prune nothing).
-    fn is_and_root(&self) -> bool {
-        matches!(
-            self.steps.last(),
-            Some(Step::Combine(arity, plan)) if *arity >= 2 && plan.op == PlanOp::Intersect
-        )
-    }
-
     /// Fold `children` under `op`, flattening same-op sub-plans and computing the
     /// output shape (and thus this op's arena plan) from the children's shapes.
     fn combine(op: Op, children: impl IntoIterator<Item = BitmapExpr<'a>>) -> Self {

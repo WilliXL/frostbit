@@ -27,6 +27,7 @@ struct Built {
 }
 
 impl FrozenBitmapBuilder {
+    /// A new, empty builder.
     pub fn new() -> Self {
         Self {
             containers: Vec::new(),
@@ -61,6 +62,9 @@ impl FrozenBitmapBuilder {
         }
     }
 
+    /// Push every value from `iter`. Each must be strictly greater than all
+    /// prior values across the whole build; a non-ascending value panics (see
+    /// [`push`](Self::push)). There is no `Extend` impl for this reason.
     pub fn extend_sorted(&mut self, iter: impl IntoIterator<Item = u32>) {
         for v in iter {
             self.push(v);

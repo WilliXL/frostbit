@@ -91,8 +91,9 @@ fn bench(c: &mut Criterion) {
     g.finish();
 
     // Hole-punching: a key-selective AND — a narrow 4-block filter intersected
-    // with wide 256-block OR-groups. Punching derives the 4 surviving blocks
-    // from the narrow branch and prunes the wide branches to them before folding.
+    // with wide 256-block OR-groups. The analyzer auto-derives the 4 surviving
+    // blocks from the narrow branch and prunes the wide branches to them before
+    // folding (no explicit call — it's part of the fold plan).
     let mut st2 = 0xB0B0_CAFEu64;
     let sel = Set::new(&[
         band(0, 4, 1500, &mut st2),   // 0: narrow filter — 4 blocks
@@ -103,14 +104,11 @@ fn bench(c: &mut Criterion) {
     ]);
     let sel_spec = and(vec![leaf(0), or(vec![leaf(1), leaf(2)]), or(vec![leaf(3), leaf(4)])]);
     let want = rb_vec(&eval_rb(&sel_spec, &sel));
-    assert_eq!(fb_vec(&build_fb(&sel_spec, &sel).materialize()), want, "selective plain");
-    assert_eq!(fb_vec(&build_fb(&sel_spec, &sel).punch_holes().materialize()), want, "selective punched");
+    assert_eq!(fb_vec(&build_fb(&sel_spec, &sel).materialize()), want, "selective");
 
-    let unpunched = build_fb(&sel_spec, &sel);
-    let punched = build_fb(&sel_spec, &sel).punch_holes();
+    let expr = build_fb(&sel_spec, &sel);
     let mut h = c.benchmark_group("holepunch");
-    h.bench_function("selective/frostbit", |b| b.iter(|| black_box(unpunched.materialize())));
-    h.bench_function("selective/frostbit_punched", |b| b.iter(|| black_box(punched.materialize())));
+    h.bench_function("selective/frostbit", |b| b.iter(|| black_box(expr.materialize())));
     h.bench_function(format!("selective/{RB}"), |b| {
         b.iter(|| black_box(eval_rb(black_box(&sel_spec), &sel)))
     });

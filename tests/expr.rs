@@ -138,7 +138,6 @@ fn short_circuit_empty_subtree() {
         BitmapExpr::leaf(big.view()),
     ]);
     assert!(and.materialize().view().iter().next().is_none());
-    assert!(and.punch_holes().materialize().view().iter().next().is_none());
 
     // DIFF(∅, big) = ∅ — the lhs guard fires.
     let d = BitmapExpr::difference(
@@ -156,12 +155,12 @@ fn short_circuit_empty_subtree() {
     assert_eq!(got, (0..5000).collect::<Vec<_>>());
 }
 
-/// Hole-punching is result-preserving: an AND-rooted tree, punched, must yield
-/// exactly the roaring oracle. Roots are forced to N-way ANDs (the only shape
-/// `punch_holes` engages), with random — often OR/DIFF — branches underneath so
-/// the mask prunes dead keys inside nested subtrees.
+/// Auto hole-punching is result-preserving: an AND-rooted tree (the only shape
+/// the analyzer derives a mask for) must yield exactly the roaring oracle, with
+/// random — often OR/DIFF — branches underneath so the mask prunes dead keys
+/// inside nested subtrees.
 #[test]
-fn punched_and_trees_match_roaring() {
+fn and_root_trees_match_roaring() {
     let mut st = 0x50FF_2026_u64;
     let pool = Pool::new(&mut st, 12);
     for _ in 0..400 {
@@ -177,7 +176,7 @@ fn punched_and_trees_match_roaring() {
                 Some(a) => a & r,
             });
         }
-        let expr = BitmapExpr::and(exprs).punch_holes();
+        let expr = BitmapExpr::and(exprs);
         assert_tree(&expr, &acc.unwrap());
     }
 }

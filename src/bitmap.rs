@@ -114,6 +114,9 @@ impl FrozenBitmap {
         Self { buf }
     }
 
+    /// The raw frozen bytes in wire format — persist or `mmap` these; a later
+    /// [`FrozenBitmapView::from_bytes`](crate::FrozenBitmapView::from_bytes)
+    /// reads them back with no copy.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf

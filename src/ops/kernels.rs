@@ -27,6 +27,7 @@ fn trivial(views: &[FrozenBitmapView<'_>], drive: usize) -> bool {
 /// N-way intersection (AND). Driven by the input with the fewest containers:
 /// only its keys are visited, and the others are `advance_to`-skipped to each —
 /// so a selective conjunct never forces a full walk of the large inputs.
+/// Degenerate inputs: `&[]` returns the empty set; a single input is copied.
 pub fn intersect(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
     if !views.is_empty() {
         let seed = (0..views.len()).min_by_key(|&i| views[i].num_containers()).unwrap();
@@ -175,6 +176,7 @@ fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &mut [ContainerR
 // --- union ------------------------------------------------------------------
 
 /// N-way union (OR).
+/// Degenerate inputs: `&[]` returns the empty set; a single input is copied.
 pub fn union(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
     union_into(views).serialize()
 }
@@ -359,6 +361,7 @@ fn run_acc_to_bitmap(arena: &mut OpArena, s: usize) {
 // --- difference -------------------------------------------------------------
 
 /// N-way difference: `inputs[0]` minus the rest.
+/// Degenerate inputs: `&[]` returns the empty set; a single input is copied.
 pub fn diff(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
     if !views.is_empty() && trivial(views, 0) {
         let plan = plan_trivial(Op::Diff, views, 0);

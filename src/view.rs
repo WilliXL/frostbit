@@ -153,23 +153,27 @@ impl<'a> FrozenBitmapView<'a> {
         }
     }
 
+    /// The underlying frozen bytes this view borrows.
     #[inline]
     pub fn as_bytes(&self) -> &'a [u8] {
         self.bytes
     }
 
-    /// Whether this view reads the inline (`FI`) encoding.
+    /// Whether this view reads the inline (`FI`) encoding rather than the
+    /// standard container format. An encoding detail — most callers don't need
+    /// it; queries behave identically across both.
     #[inline]
     pub fn is_inline(&self) -> bool {
         matches!(self.repr, Repr::Inline { .. })
     }
 
-    /// Total set bits.
+    /// Total set bits (cardinality).
     #[inline]
     pub fn len(&self) -> u64 {
         self.cardinality
     }
 
+    /// Whether the set is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.cardinality == 0
