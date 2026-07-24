@@ -24,11 +24,23 @@ fn trivial(views: &[FrozenBitmapView<'_>], drive: usize) -> bool {
         && views.iter().map(|v| v.as_bytes().len()).sum::<usize>() <= TRIVIAL_MAX_BYTES
 }
 
-/// N-way intersection (AND). Driven by the input with the fewest containers:
-/// only its keys are visited, and the others are `advance_to`-skipped to each —
-/// so a selective conjunct never forces a full walk of the large inputs.
-/// Degenerate inputs: `&[]` returns the empty set; a single input is copied.
+/// N-way intersection (AND), in op-ready standard form. Driven by the input with
+/// the fewest containers: only its keys are visited, and the others are
+/// `advance_to`-skipped to each — so a selective conjunct never forces a full
+/// walk of the large inputs. Degenerate inputs: `&[]` returns the empty set; a
+/// single input is copied.
 pub fn intersect(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+    intersect_arena(views).serialize()
+}
+
+/// Like [`intersect`], but serialized to the smallest (compact) form for
+/// storage rather than op-ready form.
+pub fn intersect_compact(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+    intersect_arena(views).serialize_compact()
+}
+
+/// Fold an AND into a pooled arena (shared by [`intersect`] / [`intersect_compact`]).
+fn intersect_arena(views: &[FrozenBitmapView<'_>]) -> OpArena {
     if !views.is_empty() {
         let seed = (0..views.len()).min_by_key(|&i| views[i].num_containers()).unwrap();
         if trivial(views, seed) {
@@ -36,10 +48,10 @@ pub fn intersect(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
             let mut arena = OpArena::from_plan(&plan);
             crate::ops::plan::recycle(plan);
             intersect_fold(&mut arena, views);
-            return arena.serialize();
+            return arena;
         }
     }
-    intersect_into(views).serialize()
+    intersect_into(views)
 }
 
 /// AND, folded into a (pooled) arena left for the caller to fold further or
@@ -175,10 +187,15 @@ fn intersect_key(arena: &mut OpArena, i: usize, key: u16, refs: &mut [ContainerR
 
 // --- union ------------------------------------------------------------------
 
-/// N-way union (OR).
+/// N-way union (OR), in op-ready standard form.
 /// Degenerate inputs: `&[]` returns the empty set; a single input is copied.
 pub fn union(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
     union_into(views).serialize()
+}
+
+/// Like [`union`], but serialized to the smallest (compact) form for storage.
+pub fn union_compact(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+    union_into(views).serialize_compact()
 }
 
 /// OR, folded into a (pooled) arena for the caller to chain or serialize.
@@ -360,17 +377,27 @@ fn run_acc_to_bitmap(arena: &mut OpArena, s: usize) {
 
 // --- difference -------------------------------------------------------------
 
-/// N-way difference: `inputs[0]` minus the rest.
+/// N-way difference (`inputs[0]` minus the rest), in op-ready standard form.
 /// Degenerate inputs: `&[]` returns the empty set; a single input is copied.
 pub fn diff(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+    diff_arena(views).serialize()
+}
+
+/// Like [`diff`], but serialized to the smallest (compact) form for storage.
+pub fn diff_compact(views: &[FrozenBitmapView<'_>]) -> FrozenBitmap {
+    diff_arena(views).serialize_compact()
+}
+
+/// Fold a DIFF into a pooled arena (shared by [`diff`] / [`diff_compact`]).
+fn diff_arena(views: &[FrozenBitmapView<'_>]) -> OpArena {
     if !views.is_empty() && trivial(views, 0) {
         let plan = plan_trivial(Op::Diff, views, 0);
         let mut arena = OpArena::from_plan(&plan);
         crate::ops::plan::recycle(plan);
         diff_fold(&mut arena, views);
-        return arena.serialize();
+        return arena;
     }
-    diff_into(views).serialize()
+    diff_into(views)
 }
 
 /// DIFF, folded into a (pooled) arena for the caller to chain or serialize.

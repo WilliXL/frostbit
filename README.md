@@ -113,7 +113,10 @@ Flat N-way folds take a slice of views and produce an owned result in one pass:
 let out = intersect_fast(&[a.view(), b.view(), c.view()]);
 ```
 
-`_fast` results are in op-ready standard form, ideal for feeding the next op.
+`_fast` results are in op-ready standard form, ideal for feeding the next op;
+the matching `_compact` ops (`intersect_compact`, `union_compact`,
+`difference_compact`) return the smallest form for storage instead. Both fold
+identically — they differ only in how the result serializes.
 For boolean *trees*, build a `BitmapExpr` — construction **is** the analysis,
 so build once and `materialize()` per query:
 

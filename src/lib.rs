@@ -39,9 +39,14 @@ pub mod ops;
 #[cfg(not(feature = "internals"))]
 mod ops;
 
-/// Op-ready (`_fast`) set operations: results are standard-format, ready to
-/// feed the next op. Use the (forthcoming) `_compact` variants for storage.
-pub use ops::kernels::{diff as difference_fast, intersect as intersect_fast, union as union_fast};
+/// Free set operations in two intents: `_fast` results are op-ready standard
+/// container form (ideal for feeding the next op); `_compact` results are the
+/// smallest form (ideal for persistence). Both fold identically — they differ
+/// only in how the result is serialized.
+pub use ops::kernels::{
+    diff as difference_fast, diff_compact as difference_compact, intersect as intersect_fast,
+    intersect_compact, union as union_fast, union_compact,
+};
 
 #[cfg(feature = "roaring")]
 mod convert;
