@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Frozen, mmap-friendly, zero-copy roaring bitmaps with fast set operations."
+repository = "https://github.com/WilliXL/frostbit"
+readme = "README.md"
+keywords = ["bitmap", "roaring", "mmap", "zero-copy", "simd"]
+categories = ["data-structures", "compression"]
 
 [dependencies]
 aligned-vec = "0.6"
