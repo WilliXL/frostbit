@@ -446,6 +446,14 @@ impl<'a> IntoIterator for FrozenBitmapView<'a> {
     }
 }
 
+impl<'a> IntoIterator for &FrozenBitmapView<'a> {
+    type Item = u32;
+    type IntoIter = Iter<'a>;
+    fn into_iter(self) -> Iter<'a> {
+        self.iter()
+    }
+}
+
 fn inline_contains(bytes: &[u8], count: usize, value: u32) -> bool {
     let (mut lo, mut hi) = (0usize, count);
     while lo < hi {

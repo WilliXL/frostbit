@@ -55,3 +55,22 @@ fn view_access() {
     let copy = FrozenBitmap::from_bytes(bm.as_bytes()).unwrap();
     assert_eq!(copy.view().len(), 3);
 }
+
+#[test]
+fn owned_read_api() {
+    // The owned type queries directly — `len()` is cardinality, not byte length
+    // (the old `Deref<[u8]>` footgun where `bm.len()` returned bytes is gone).
+    let bm = build(&[1, 2, 3, 70_000]);
+    assert_eq!(bm.len(), 4);
+    assert!(bm.byte_len() >= 16 && bm.byte_len() != 4);
+    assert!(!bm.is_empty());
+    assert!(bm.contains(70_000) && !bm.contains(5));
+    assert_eq!(bm.min(), Some(1));
+    assert_eq!(bm.max(), Some(70_000));
+    assert_eq!((&bm).into_iter().collect::<Vec<_>>(), vec![1, 2, 3, 70_000]);
+
+    let empty = FrozenBitmap::empty();
+    assert!(empty.is_empty());
+    assert_eq!(empty.len(), 0);
+    assert!(empty.min().is_none());
+}

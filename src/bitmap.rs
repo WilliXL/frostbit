@@ -1,7 +1,6 @@
 //! Owned frozen bitmap: a 64-byte-aligned byte buffer in frozen wire format.
 
 use std::fmt;
-use std::ops::Deref;
 
 use aligned_vec::{AVec, ConstAlign};
 
@@ -57,8 +56,10 @@ pub(crate) fn result_buf(cap: usize) -> AlignedBuf {
 
 /// An owned frozen bitmap. The backing allocation is 64-byte aligned so bitmap
 /// container payloads sit on cache-line boundaries for SIMD. Produced by the
-/// builder, set ops, and roaring conversion; query it via [`Self::as_bytes`]
-/// (a `FrozenBitmapView` reader lands in a later step).
+/// builder, set ops, and roaring conversion. Query it directly
+/// ([`contains`](Self::contains), [`len`](Self::len), [`min`](Self::min) /
+/// [`max`](Self::max), [`iter`](Self::iter)) or take a zero-copy
+/// [`view`](Self::view); the raw bytes are [`as_bytes`](Self::as_bytes).
 pub struct FrozenBitmap {
     buf: AlignedBuf,
 }
@@ -79,6 +80,11 @@ impl Drop for FrozenBitmap {
 }
 
 impl FrozenBitmap {
+    /// The empty frozen bitmap.
+    pub fn empty() -> Self {
+        crate::FrozenBitmapBuilder::new().finish()
+    }
+
     /// Validate and copy frozen-bitmap `bytes` into a 64-byte-aligned buffer.
     /// `None` if `bytes` is not a well-formed frozen bitmap.
     ///
@@ -124,18 +130,40 @@ impl FrozenBitmap {
         self.view().iter()
     }
 
-    /// Serialized size in bytes.
+    /// Serialized size in bytes (not the cardinality — see [`len`](Self::len)).
     #[inline]
     pub fn byte_len(&self) -> usize {
         self.buf.len()
     }
-}
 
-impl Deref for FrozenBitmap {
-    type Target = [u8];
+    /// Number of values in the set (cardinality).
     #[inline]
-    fn deref(&self) -> &[u8] {
-        &self.buf
+    pub fn len(&self) -> u64 {
+        self.view().len()
+    }
+
+    /// Whether the set is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.view().is_empty()
+    }
+
+    /// Whether `value` is in the set. O(log containers) + a per-container probe.
+    #[inline]
+    pub fn contains(&self, value: u32) -> bool {
+        self.view().contains(value)
+    }
+
+    /// Smallest value, or `None` if the set is empty.
+    #[inline]
+    pub fn min(&self) -> Option<u32> {
+        self.view().min()
+    }
+
+    /// Largest value, or `None` if the set is empty.
+    #[inline]
+    pub fn max(&self) -> Option<u32> {
+        self.view().max()
     }
 }
 
@@ -143,6 +171,15 @@ impl AsRef<[u8]> for FrozenBitmap {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         &self.buf
+    }
+}
+
+impl<'a> IntoIterator for &'a FrozenBitmap {
+    type Item = u32;
+    type IntoIter = crate::Iter<'a>;
+    #[inline]
+    fn into_iter(self) -> crate::Iter<'a> {
+        self.iter()
     }
 }
 

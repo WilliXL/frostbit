@@ -36,3 +36,9 @@ impl From<&FrozenBitmap> for RoaringBitmap {
         bm.to_roaring()
     }
 }
+
+impl From<FrozenBitmapView<'_>> for RoaringBitmap {
+    fn from(v: FrozenBitmapView<'_>) -> Self {
+        v.to_roaring()
+    }
+}
