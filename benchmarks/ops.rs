@@ -556,12 +556,79 @@ fn stages(c: &mut Criterion) {
 #[cfg(not(feature = "internals"))]
 fn stages(_c: &mut Criterion) {}
 
+
+/// Experiments for the two batching hypotheses on array_union.
+///
+/// H1 (pipeline): union_merge carries `vmax` across trips, so it runs at its
+///   network *latency* (~28 cyc/trip) not throughput (~6). If that is right,
+///   several independent merges in flight should cost far less than N x one.
+/// H2 (re-streaming): N-way folds are pairwise chains, so the accumulator is
+///   re-streamed f(n) = (n+1)/2 - 1/n times. If that is right, a 4-way union
+///   costs ~2.25x a 2-way over the same total input.
+///
+/// H1 also controls for a measurement artifact: the existing kernel bench
+/// reuses ONE `out` buffer, so consecutive calls may serialize through memory.
+#[cfg(feature = "internals")]
+fn hypotheses(c: &mut Criterion) {
+    use frostbit::ops::simd as k;
+    let mut st = 0x4A11_D0C5_u64;
+    let gen = |n: usize, st: &mut u64| -> Vec<u16> {
+        let mut s = std::collections::BTreeSet::new();
+        while s.len() < n {
+            s.insert((splitmix64(st) % 65536) as u16);
+        }
+        s.into_iter().collect()
+    };
+    // Four independent 800x800 pairs, each with its OWN output buffer.
+    let pairs: Vec<(Vec<u16>, Vec<u16>)> =
+        (0..4).map(|_| (gen(800, &mut st), gen(800, &mut st))).collect();
+    let mut outs: Vec<Vec<u16>> = (0..4).map(|_| vec![0u16; 4096]).collect();
+    let mut one_out = vec![0u16; 4096];
+
+    let mut g = c.benchmark_group("hypo");
+    // Baseline: one merge, shared output buffer (what kernel/union measures).
+    g.bench_function("union_1x_shared_out", |b| {
+        b.iter(|| black_box(k::array_union(&pairs[0].0, &pairs[0].1, &mut one_out)))
+    });
+    // Same work, private output buffer — isolates the memory-serialization artifact.
+    g.bench_function("union_1x_private_out", |b| {
+        b.iter(|| black_box(k::array_union(&pairs[0].0, &pairs[0].1, &mut outs[0])))
+    });
+    // H1: four independent merges per iteration, each with its own buffers, so
+    // their carried chains can overlap. Divide by 4 to compare per-merge.
+    g.bench_function("union_4x_independent", |b| {
+        b.iter(|| {
+            for (i, (x, y)) in pairs.iter().enumerate() {
+                black_box(k::array_union(x, y, &mut outs[i]));
+            }
+        })
+    });
+
+    // H2: same total input, folded pairwise at fan-in 2 vs 4.
+    let (a0, a1, a2, a3) = (&pairs[0].0, &pairs[1].0, &pairs[2].0, &pairs[3].0);
+    let mut t1 = vec![0u16; 4096];
+    let mut t2 = vec![0u16; 4096];
+    g.bench_function("union_fanin2", |b| {
+        b.iter(|| black_box(k::array_union(a0, a1, &mut t1)))
+    });
+    g.bench_function("union_fanin4_pairwise", |b| {
+        b.iter(|| {
+            let n = k::array_union(a0, a1, &mut t1);
+            let n = k::array_union(&t1[..n], a2, &mut t2);
+            black_box(k::array_union(&t2[..n], a3, &mut t1))
+        })
+    });
+    g.finish();
+}
+#[cfg(not(feature = "internals"))]
+fn hypotheses(_c: &mut Criterion) {}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .sample_size(30)
         .warm_up_time(Duration::from_millis(1200))
         .measurement_time(Duration::from_secs(4));
-    targets = bench, decomp, branches, membw, stages
+    targets = bench, decomp, branches, membw, stages, hypotheses
 }
 criterion_main!(benches);
