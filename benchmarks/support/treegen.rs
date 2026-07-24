@@ -102,7 +102,90 @@ pub fn mixed_pool() -> Set {
     for i in 0..3 {
         inputs.push(runs(20, 3000 + i * 1500, 5000));
     }
+    // --- classes the original pool had none of (indices 17.. are additive, so
+    // the named shapes above keep their leaf indices) ---
+    // Tiny scattered sets: small enough that the builder picks the inline (FI)
+    // encoding, which nothing else in the pool exercises.
+    for i in 0..2 {
+        inputs.push(sorted((0..40u32).map(|v| v * 997 + i * 13).collect()));
+    }
+    // A single dense container, and one that fills a whole 64K block: the
+    // boundaries where array/bitmap/run selection flips.
+    inputs.push((0..9000u32).collect());
+    inputs.push((0..65_536u32).collect());
+    // Disjoint key bands — an AND over these is statically empty, which is the
+    // planner's early-out, and an OR over them never overlaps.
+    for i in 0..3u32 {
+        let base = (600 + i * 200) << 16;
+        inputs.push(sorted((0..4000u32).map(|v| base + v * 7).collect()));
+    }
+    // A dense *run* leaf and a *bitmap* leaf over the SAME keys — the shape
+    // BUG-3 needed (run accumulator meeting a bitmap subtrahend at one key).
+    inputs.push(sorted((0..12u32).flat_map(|k| (0..20_000u32).map(move |v| (k << 16) | v)).collect()));
+    inputs.push(sorted((0..12u32).flat_map(|k| (0..30_000u32).map(move |v| (k << 16) | (v * 2))).collect()));
+    // Extreme skew: a handful of values that a huge leaf mostly contains.
+    inputs.push(sorted((0..24u32).map(|v| (v << 16) | (v * 101)).collect()));
     Set::new(&inputs)
+}
+
+/// Shape families the profiled generator cannot reach by chance, each chosen
+/// because it drives a distinct path through the engine.
+pub fn gen_family(st: &mut u64, n: usize) -> Spec {
+    let pick = |st: &mut u64| (splitmix64(st) as usize) % n;
+    match splitmix64(st) % 10 {
+        // Interior AND over an *expanding* subtree, under a non-narrowing root:
+        // the only shape where per-node hole-punch push-down would pay.
+        0 => or(vec![
+            and(vec![leaf(pick(st)), or(vec![leaf(pick(st)), leaf(pick(st))])]),
+            leaf(pick(st)),
+        ]),
+        // Deep left-nested chain: exercises step-list splicing, which is
+        // quadratic in depth, where the profiled generator builds balanced trees.
+        1 => {
+            let mut e = leaf(pick(st));
+            for _ in 0..(8 + splitmix64(st) % 16) {
+                e = and(vec![e, leaf(pick(st))]);
+            }
+            e
+        }
+        // Very high fan-in flat folds (16..48 operands).
+        2 => {
+            let w = 16 + (splitmix64(st) as usize) % 33;
+            let kids = (0..w).map(|_| leaf(pick(st))).collect();
+            if splitmix64(st).is_multiple_of(2) { or(kids) } else { and(kids) }
+        }
+        // Empty subtree feeding an expensive sibling: the short-circuit guard.
+        3 => {
+            let x = pick(st);
+            and(vec![diff(leaf(x), leaf(x)), or((0..6).map(|_| leaf(pick(st))).collect())])
+        }
+        // Repeated identical operand (idempotent fold).
+        4 => {
+            let x = pick(st);
+            let kids = (0..(2 + splitmix64(st) as usize % 5)).map(|_| leaf(x)).collect();
+            if splitmix64(st).is_multiple_of(2) { and(kids) } else { or(kids) }
+        }
+        // Nested differences — DIFF never flattens, so each is its own fold.
+        5 => {
+            let mut e = leaf(pick(st));
+            for _ in 0..(2 + splitmix64(st) % 4) {
+                e = diff(e, leaf(pick(st)));
+            }
+            e
+        }
+        // Disjoint-key AND: the planner proves it empty before reading a byte.
+        6 => and(vec![leaf(17 + (splitmix64(st) as usize) % 2), leaf(21 + (splitmix64(st) as usize) % 3)]),
+        // Run LHS minus bitmap RHS at shared keys (the BUG-3 shape), nested so
+        // it runs partner-major.
+        7 => and(vec![diff(leaf(24), leaf(25)), leaf(pick(st))]),
+        // Extreme skew: a tiny leaf intersected with the widest ones.
+        8 => and(vec![leaf(26), leaf(pick(st)), leaf(pick(st))]),
+        // A wide OR of DIFFs — every operand is a non-flattened subtree, so the
+        // parent guards each one.
+        _ => or((0..(3 + splitmix64(st) as usize % 4))
+            .map(|_| diff(leaf(pick(st)), leaf(pick(st))))
+            .collect()),
+    }
 }
 
 /// A leaf whose blocks span keys `[k0, k1)`, `per_key` random values each — used
@@ -247,6 +330,9 @@ pub fn corpus_specs(n_trees: usize, pool_len: usize) -> Vec<Spec> {
         })
         .collect();
     specs.extend((0..pillars).map(|_| gen_pillar(&mut st, pool_len)));
+    // Same again from the shape families — structurally different trees, not
+    // more samples of the same distribution.
+    specs.extend((0..n_trees).map(|_| gen_family(&mut st, pool_len)));
     let full = specs.iter().filter(|s| count_leaves(s) == 100 && depth_of(s) == 15).count();
     assert!(full >= pillars, "corpus must include ≥{pillars} full-extreme trees");
     specs

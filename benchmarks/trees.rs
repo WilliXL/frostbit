@@ -21,7 +21,7 @@ use treegen::*;
 /// what a query engine pays per query; roaring re-evaluates recursively).
 fn corpus(c: &mut Criterion) {
     let pool = mixed_pool();
-    let specs = corpus_specs(25_000, pool.len());
+    let specs = corpus_specs(25_000, pool.len()); // 25k profiled + 25k family shapes
     let total_leaves: usize = specs.iter().map(count_leaves).sum();
 
     // Parity spot-check across the corpus (every 64th tree).
@@ -37,7 +37,7 @@ fn corpus(c: &mut Criterion) {
     g.warm_up_time(Duration::from_secs(2));
     g.measurement_time(Duration::from_secs(20));
     g.throughput(criterion::Throughput::Elements(specs.len() as u64));
-    g.bench_function("25k_trees/frostbit", |b| {
+    g.bench_function("50k_trees/frostbit", |b| {
         b.iter(|| {
             for spec in &specs {
                 black_box(build_fb(spec, &pool).materialize());
@@ -47,14 +47,14 @@ fn corpus(c: &mut Criterion) {
     // Analysis alone: construct every tree (which *is* the analysis pass) and
     // drop it without materializing. The gap to `25k_trees/frostbit` is what
     // execution costs, so these two together say where corpus time goes.
-    g.bench_function("25k_trees/frostbit_analyze", |b| {
+    g.bench_function("50k_trees/frostbit_analyze", |b| {
         b.iter(|| {
             for spec in &specs {
                 black_box(build_fb(spec, &pool));
             }
         })
     });
-    g.bench_function(format!("25k_trees/{RB}"), |b| {
+    g.bench_function(format!("50k_trees/{RB}"), |b| {
         b.iter(|| {
             for spec in &specs {
                 black_box(eval_rb(spec, &pool));
