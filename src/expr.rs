@@ -51,7 +51,7 @@ enum Step<'a> {
 /// Built once by the [`BitmapExpr`] combinators; run by [`FoldPlan::execute`]
 /// with no further analysis. Borrows the tree's leaves.
 #[derive(Clone)]
-pub struct FoldPlan<'a> {
+struct FoldPlan<'a> {
     steps: Vec<Step<'a>>,
     shape: Shape,
     max_depth: usize,
@@ -60,9 +60,16 @@ pub struct FoldPlan<'a> {
     live: Option<Arc<KeyMask>>,
 }
 
-/// A boolean combination of frozen bitmaps.
+/// A boolean combination of frozen bitmaps. Build it with the
+/// [`leaf`](Self::leaf) / [`owned`](Self::owned) / [`and`](Self::and) /
+/// [`or`](Self::or) / [`difference`](Self::difference) constructors, then
+/// evaluate with [`materialize`](Self::materialize). The internal form is an
+/// opaque implementation detail.
 #[derive(Clone)]
-pub enum BitmapExpr<'a> {
+pub struct BitmapExpr<'a>(Node<'a>);
+
+#[derive(Clone)]
+enum Node<'a> {
     /// A zero-copy leaf.
     Leaf(FrozenBitmapView<'a>),
     /// An owned leaf, shared cheaply (e.g. a cached intermediate).
@@ -73,19 +80,19 @@ pub enum BitmapExpr<'a> {
 
 impl<'a> BitmapExpr<'a> {
     pub fn leaf(view: FrozenBitmapView<'a>) -> Self {
-        BitmapExpr::Leaf(view)
+        BitmapExpr(Node::Leaf(view))
     }
     pub fn owned(bm: Arc<FrozenBitmap>) -> Self {
-        BitmapExpr::Owned(bm)
+        BitmapExpr(Node::Owned(bm))
     }
     pub fn and(children: impl IntoIterator<Item = BitmapExpr<'a>>) -> Self {
-        BitmapExpr::Combined(FoldPlan::combine(Op::And, children))
+        BitmapExpr(Node::Combined(FoldPlan::combine(Op::And, children)))
     }
     pub fn or(children: impl IntoIterator<Item = BitmapExpr<'a>>) -> Self {
-        BitmapExpr::Combined(FoldPlan::combine(Op::Or, children))
+        BitmapExpr(Node::Combined(FoldPlan::combine(Op::Or, children)))
     }
     pub fn difference(lhs: BitmapExpr<'a>, rhs: BitmapExpr<'a>) -> Self {
-        BitmapExpr::Combined(FoldPlan::diff(lhs, rhs))
+        BitmapExpr(Node::Combined(FoldPlan::diff(lhs, rhs)))
     }
 
     /// Enable hole-punching. When this is a root intersection (AND of ≥2
@@ -94,37 +101,37 @@ impl<'a> BitmapExpr<'a> {
     /// `AND(narrow, OR(wide…))` never materializes the wide branch's dead
     /// blocks. A no-op for any other shape, where no key set narrows.
     pub fn punch_holes(self) -> Self {
-        match self {
-            BitmapExpr::Combined(mut fp) if fp.is_and_root() => {
+        match self.0 {
+            Node::Combined(mut fp) if fp.is_and_root() => {
                 let mut mask = KeyMask::empty();
                 for m in &fp.shape {
                     mask.set(m.key);
                 }
                 fp.live = Some(Arc::new(mask));
-                BitmapExpr::Combined(fp)
+                BitmapExpr(Node::Combined(fp))
             }
-            other => other,
+            other => BitmapExpr(other),
         }
     }
 
     /// Evaluate the tree into one [`FrozenBitmap`].
     pub fn materialize(&self) -> FrozenBitmap {
-        match self {
-            BitmapExpr::Leaf(v) => FrozenBitmap::from_bytes_trusted(v.as_bytes()),
-            BitmapExpr::Owned(bm) => (**bm).clone(),
-            BitmapExpr::Combined(plan) => plan.execute(),
+        match &self.0 {
+            Node::Leaf(v) => FrozenBitmap::from_bytes_trusted(v.as_bytes()),
+            Node::Owned(bm) => (**bm).clone(),
+            Node::Combined(plan) => plan.execute(),
         }
     }
 }
 
 impl<'a> From<FrozenBitmapView<'a>> for BitmapExpr<'a> {
     fn from(v: FrozenBitmapView<'a>) -> Self {
-        BitmapExpr::Leaf(v)
+        BitmapExpr(Node::Leaf(v))
     }
 }
 impl<'a> From<Arc<FrozenBitmap>> for BitmapExpr<'a> {
     fn from(b: Arc<FrozenBitmap>) -> Self {
-        BitmapExpr::Owned(b)
+        BitmapExpr(Node::Owned(b))
     }
 }
 
@@ -208,7 +215,7 @@ impl<'a> FoldPlan<'a> {
     /// operand copy, no sizing analysis); only the final arena is serialized.
     /// The operand stack itself is pooled, so a materialize allocates only its
     /// result.
-    pub fn execute(&self) -> FrozenBitmap {
+    fn execute(&self) -> FrozenBitmap {
         let mut guard = ExecStack::take();
         let stack = guard.borrow();
         stack.reserve(self.max_depth);
@@ -369,18 +376,18 @@ impl Inputs for Masked<'_, '_> {
 /// sub-plan, never cloned). Returns `(shape, net operands contributed, peak
 /// stack depth during its steps)`.
 fn splice<'a>(child: BitmapExpr<'a>, parent: Op, steps: &mut Vec<Step<'a>>) -> (Shape, u32, usize, bool) {
-    match child {
-        BitmapExpr::Leaf(v) => {
+    match child.0 {
+        Node::Leaf(v) => {
             let shape = view_shape(&v);
             steps.push(Step::Leaf(v));
             (shape, 1, 1, false)
         }
-        BitmapExpr::Owned(b) => {
+        Node::Owned(b) => {
             let shape = view_shape(&b.view());
             steps.push(Step::Owned(b));
             (shape, 1, 1, false)
         }
-        BitmapExpr::Combined(mut fp) => {
+        Node::Combined(mut fp) => {
             let shape = std::mem::take(&mut fp.shape);
             let root = fp.steps.last().map(|s| match s {
                 Step::Combine(_, p) => p.op,
