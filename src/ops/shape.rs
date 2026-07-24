@@ -41,7 +41,8 @@ pub type Shape = Vec<Meta>;
 /// Exact shape of a leaf, read from its container index (inline → array form).
 pub fn view_shape(view: &FrozenBitmapView<'_>) -> Shape {
     let mut c = ContainerCursor::new(view);
-    let mut out = Vec::new();
+    // Exactly one entry per container — size it once instead of regrowing.
+    let mut out = Vec::with_capacity(c.container_count());
     while c.peek_key().is_some() {
         let r = c.get();
         let typ = if r.typ == CT_INLINE { CT_ARRAY } else { r.typ };
@@ -90,7 +91,8 @@ fn min_key(curs: &[Cur<'_>]) -> Option<u16> {
 /// AND: keys present in every input; result ⊆ the smallest, so cap = shrink(min).
 pub fn intersect_shape(inputs: &[Shape]) -> Shape {
     let mut curs: Vec<Cur> = inputs.iter().map(Cur::new).collect();
-    let mut out = Vec::new();
+    // At most the smallest input's key count survives an intersection.
+    let mut out = Vec::with_capacity(inputs.iter().map(Vec::len).min().unwrap_or(0));
     while let Some(key) = min_key(&curs) {
         let (mut present, mut min_card, mut all_run, mut runs) = (0usize, u32::MAX, true, 0usize);
         for c in &mut curs {
@@ -117,7 +119,8 @@ pub fn intersect_shape(inputs: &[Shape]) -> Shape {
 pub fn union_shape(inputs: &[Shape], weights: &[usize]) -> Shape {
     debug_assert_eq!(inputs.len(), weights.len());
     let mut curs: Vec<Cur> = inputs.iter().map(Cur::new).collect();
-    let mut out = Vec::new();
+    // A union spans at least the widest input's keys.
+    let mut out = Vec::with_capacity(inputs.iter().map(Vec::len).max().unwrap_or(0));
     while let Some(key) = min_key(&curs) {
         let (mut sum, mut runs, mut any_bitmap, mut all_run, mut max_single, mut n) =
             (0u32, 0usize, false, true, 0u32, 0usize);
@@ -150,8 +153,9 @@ pub fn union_shape(inputs: &[Shape], weights: &[usize]) -> Shape {
 
 /// DIFF: `inputs[0]` minus the rest; output keys = LHS keys (RHS only shrinks).
 pub fn diff_shape(inputs: &[Shape]) -> Shape {
-    let mut out = Vec::new();
-    let Some((lhs, rest)) = inputs.split_first() else { return out };
+    let Some((lhs, rest)) = inputs.split_first() else { return Vec::new() };
+    // Output keys are exactly the LHS keys.
+    let mut out = Vec::with_capacity(lhs.len());
     let mut rhs: Vec<Cur> = rest.iter().map(Cur::new).collect();
     for l in lhs {
         // Gather RHS containers at this key.

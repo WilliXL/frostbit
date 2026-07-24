@@ -12,7 +12,7 @@
 //! arena straight from the precomputed plan and folds — it does no sizing
 //! analysis of its own.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::ops::arena::OpArena;
 use crate::ops::cursor::ContainerCursor;
@@ -55,10 +55,14 @@ struct FoldPlan<'a> {
     steps: Vec<Step<'a>>,
     shape: Shape,
     max_depth: usize,
-    /// Hole-punch mask, auto-derived by [`combine`](Self::combine) whenever a
-    /// root AND narrows: the surviving container keys, applied to every leaf
-    /// cursor so dead 64K blocks are skipped before folding.
-    live: Option<Arc<KeyMask>>,
+    /// Whether this node is an AND whose key set is narrower than some child's
+    /// — the only shape where a hole-punch mask prunes anything.
+    narrows: bool,
+    /// The mask itself, built on first use. Only the *root* ever runs, and
+    /// splicing into a parent discards a child's mask, so deriving it during
+    /// analysis would allocate and fill 8 KiB for every interior AND and throw
+    /// all but one away. Built once here, then reused by every materialize.
+    live: OnceLock<Option<Arc<KeyMask>>>,
 }
 
 /// A boolean combination of frozen bitmaps. Build it with the
@@ -163,25 +167,24 @@ impl<'a> FoldPlan<'a> {
             Op::Or => (PlanOp::Union, shape::union_shape(&shapes, &weights)),
             Op::Diff => unreachable!("combine is AND/OR only"),
         };
-        // Auto hole-punch: when this AND's intersected key set is narrower
-        // than some child's, a mask over the surviving keys provably skips
-        // dead blocks in the wider branches — derive it here, once, as part
-        // of the analysis. (Effective only if this node stays the root:
-        // splicing into a parent drops it, and the parent re-derives.)
-        let live = (op == Op::And
+        // Auto hole-punch applies when this AND's intersected key set is
+        // narrower than some child's: a mask over the surviving keys provably
+        // skips dead blocks in the wider branches. Record *that* here (it is a
+        // length comparison); the mask is built lazily, since only the root's
+        // is ever used.
+        let narrows = op == Op::And
             && arity >= 2
-            && shapes.iter().map(Vec::len).max().is_some_and(|w| shape.len() < w))
-        .then(|| {
-            let mut mask = KeyMask::empty();
-            for m in &shape {
-                mask.set(m.key);
-            }
-            Arc::new(mask)
-        });
+            && shapes.iter().map(Vec::len).max().is_some_and(|w| shape.len() < w);
         let after = steps.len() + 1;
         steps.push(Step::Combine(arity, shape::to_plan(pop, &shape)));
         patch_guards(&mut steps, after);
-        FoldPlan { steps, shape, max_depth: max_depth.max(base).max(1), live }
+        FoldPlan {
+            steps,
+            shape,
+            max_depth: max_depth.max(base).max(1),
+            narrows,
+            live: OnceLock::new(),
+        }
     }
 
     /// `lhs` minus `rhs` (never flattened — DIFF is not associative).
@@ -198,7 +201,13 @@ impl<'a> FoldPlan<'a> {
         let after = steps.len() + 1;
         steps.push(Step::Combine(2, shape::to_plan(PlanOp::Diff, &shape)));
         patch_guards(&mut steps, after);
-        FoldPlan { steps, shape, max_depth: d0.max(1 + d1).max(2), live: None }
+        FoldPlan {
+            steps,
+            shape,
+            max_depth: d0.max(1 + d1).max(2),
+            narrows: false,
+            live: OnceLock::new(),
+        }
     }
 
     /// Run the manifest over a preallocated operand stack. Each `Combine` sizes
@@ -210,7 +219,20 @@ impl<'a> FoldPlan<'a> {
         let mut guard = ExecStack::take();
         let stack = guard.borrow();
         stack.reserve(self.max_depth);
-        let mask = self.live.as_deref();
+        // Derive the hole-punch mask on first run and keep it for every later
+        // materialize (see `live`).
+        let mask = self
+            .live
+            .get_or_init(|| {
+                self.narrows.then(|| {
+                    let mut m = KeyMask::empty();
+                    for meta in &self.shape {
+                        m.set(meta.key);
+                    }
+                    Arc::new(m)
+                })
+            })
+            .as_deref();
         let mut pc = 0;
         while pc < self.steps.len() {
             match &self.steps[pc] {
