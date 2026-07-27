@@ -17,6 +17,12 @@ pub trait Inputs {
     fn cursor(&self, i: usize) -> ContainerCursor<'_>;
     /// Container count of input `i` (drives AND seed selection).
     fn container_count(&self, i: usize) -> usize;
+    /// Whether input `i` is another fold's result rather than a stored leaf —
+    /// i.e. whether the plan's description of it was a prediction.
+    #[inline]
+    fn is_intermediate(&self, _i: usize) -> bool {
+        false
+    }
     #[inline]
     fn is_empty(&self) -> bool {
         self.len() == 0

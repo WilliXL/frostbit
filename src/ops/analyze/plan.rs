@@ -25,6 +25,32 @@ pub struct SlotPlan {
     pub capacity: u32,
 }
 
+/// The leaf-operand side of a union's per-key aggregate, frozen at analysis
+/// time.
+///
+/// A leaf's shape is read from real containers, so its contribution to a key is
+/// a fact and never needs recomputing. An intermediate's is a bound, and a loose
+/// one. Splitting the aggregate lets the executor keep the settled half and
+/// re-fold only the half that was guessed, against what the producing fold
+/// actually emitted — without touching a single leaf container again.
+#[derive(Debug, Clone, Copy)]
+pub struct UnionAgg {
+    pub sum_card: u32,
+    pub total_runs: u32,
+    pub max_single: u32,
+    pub n: u16,
+    pub any_bitmap: bool,
+    /// Vacuously true with no leaf operands present, so folding in the
+    /// intermediates decides it.
+    pub all_run: bool,
+}
+
+impl Default for UnionAgg {
+    fn default() -> Self {
+        Self { sum_card: 0, total_runs: 0, max_single: 0, n: 0, any_bitmap: false, all_run: true }
+    }
+}
+
 /// Output container layout for one op. `slots` are ascending by key.
 #[derive(Debug, Clone)]
 pub struct Plan {
@@ -36,6 +62,10 @@ pub struct Plan {
     /// merges flip a per-slot side bit between the two (out ≠ in without a
     /// staging copy, while every pass streams its inputs sequentially).
     pub double: bool,
+    /// Parallel to `slots`, and only for a union whose operands include an
+    /// intermediate: the leaf-side aggregate at each key. Empty otherwise, which
+    /// is the signal that this plan is already built from facts.
+    pub leaf_agg: Vec<UnionAgg>,
 }
 
 /// Scratch the kernels need: one bitmap accumulator + one run/bitmap temp.
@@ -63,6 +93,94 @@ mod slot_pool {
     }
 }
 
+mod agg_pool {
+    use super::UnionAgg;
+    use crate::api::pool::Pool;
+
+    thread_local! {
+        static POOL: Pool<Vec<UnionAgg>> = const { Pool::new("union-agg") };
+    }
+
+    pub(super) fn take() -> Vec<UnionAgg> {
+        POOL.with(|p| p.take(Vec::new))
+    }
+    pub(super) fn put(mut v: Vec<UnionAgg>) {
+        v.clear();
+        POOL.with(|p| p.put(v));
+    }
+}
+
+/// Re-derive a union's slot sizes from what its intermediate operands actually
+/// produced, keeping the leaf half of every key's aggregate as analysis left it.
+///
+/// This is the cheap half of replanning. Re-running the cursor planner over all
+/// operands re-reads every leaf container the fold is about to read anyway, and
+/// measured 7% on the corpus. The leaf contributions were already facts, so they
+/// are carried in `base.leaf_agg`; only the guessed half is refolded, against
+/// the arenas alone. Keys are a subset of `base.slots` — an intermediate can
+/// only produce fewer keys than its bound predicted — so the walk is one merge.
+pub(crate) fn plan_union_observed<I: Inputs + ?Sized>(base: &Plan, inputs: &I) -> Plan {
+    let mut agg = agg_pool::take();
+    agg.extend_from_slice(&base.leaf_agg);
+    for i in 0..inputs.len() {
+        if !inputs.is_intermediate(i) {
+            continue;
+        }
+        let mut c = inputs.cursor(i);
+        let mut j = 0usize;
+        while let Some(k) = c.peek_key() {
+            while j < base.slots.len() && base.slots[j].key < k {
+                j += 1;
+            }
+            if j == base.slots.len() {
+                break;
+            }
+            if base.slots[j].key == k {
+                let cr = c.get();
+                let a = &mut agg[j];
+                a.sum_card = a.sum_card.saturating_add(cr.card);
+                a.total_runs += cr.num_runs() as u32;
+                a.max_single = a.max_single.max(cr.stored_bytes() as u32);
+                a.n += 1;
+                a.any_bitmap |= cr.typ == CT_BITMAP;
+                a.all_run &= cr.typ == CT_RUN;
+            }
+            c.advance();
+        }
+    }
+    let mut slots = slot_pool::take();
+    for (j, sp) in base.slots.iter().enumerate() {
+        let a = agg[j];
+        // No operand reaches this key after all: the bound predicted it, nothing
+        // produced it. An unclaimed slot serializes to nothing.
+        let capacity = if a.n == 0 {
+            0
+        } else {
+            decide::union_key(
+                &decide::UnionKey {
+                    sum_card: a.sum_card,
+                    total_runs: a.total_runs as usize,
+                    any_bitmap: a.any_bitmap,
+                    all_run: a.all_run,
+                    max_single: a.max_single,
+                    n: a.n as usize,
+                },
+                decide::Fanin::Interior,
+            )
+            .cap
+        };
+        slots.push(SlotPlan { key: sp.key, capacity });
+    }
+    agg_pool::put(agg);
+    Plan {
+        op: Op::Union,
+        double: wants_partner_major(Op::Union, &slots),
+        slots,
+        scratch_bytes: SCRATCH_BYTES,
+        leaf_agg: Vec::new(),
+    }
+}
+
 pub(crate) use slot_pool::clear as clear_slot_pool;
 
 /// Return a one-shot plan's slot buffer to the per-thread pool. Tree plans
@@ -85,7 +203,7 @@ pub(crate) fn plan_trivial<I: Inputs + ?Sized>(op: Op, inputs: &I, seed: usize) 
         slots.push(SlotPlan { key, capacity: BITMAP_BYTES as u32 });
         c.advance();
     }
-    Plan { op, slots, scratch_bytes: SCRATCH_BYTES, double: false }
+    Plan { op, slots, scratch_bytes: SCRATCH_BYTES, double: false, leaf_agg: Vec::new() }
 }
 
 impl Plan {
@@ -174,7 +292,7 @@ pub(crate) fn wants_partner_major(op: Op, slots: &[SlotPlan]) -> bool {
 pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = slot_pool::take();
     if inputs.is_empty() {
-        return Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES, double: false };
+        return Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES, double: false, leaf_agg: Vec::new() };
     }
     let (mut seed, mut min_n, mut max_n) = (0, usize::MAX, 0);
     for i in 0..inputs.len() {
@@ -221,7 +339,7 @@ pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
             }
         }
     }
-    Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES, double: false }
+    Plan { op: Op::Intersect, slots, scratch_bytes: SCRATCH_BYTES, double: false, leaf_agg: Vec::new() }
 }
 
 /// OR: output keys = ∪ of all inputs' keys. Per key the slot must hold the
@@ -232,7 +350,7 @@ pub fn plan_intersect<I: Inputs + ?Sized>(inputs: &I) -> Plan {
 pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = slot_pool::take();
     if inputs.is_empty() {
-        return Plan { op: Op::Union, slots, scratch_bytes: SCRATCH_BYTES, double: false };
+        return Plan { op: Op::Union, slots, scratch_bytes: SCRATCH_BYTES, double: false, leaf_agg: Vec::new() };
     }
     let mut scratch = FoldScratch::take();
     let (cursors, _) = scratch.borrow();
@@ -271,7 +389,7 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
         .cap;
         slots.push(SlotPlan { key, capacity });
     }
-    Plan { op: Op::Union, double: wants_partner_major(Op::Union, &slots), slots, scratch_bytes: SCRATCH_BYTES }
+    Plan { op: Op::Union, double: wants_partner_major(Op::Union, &slots), slots, scratch_bytes: SCRATCH_BYTES, leaf_agg: Vec::new() }
 }
 
 /// DIFF: `inputs[0]` (A) minus the rest. Output keys = A's keys (the RHS can
@@ -281,7 +399,7 @@ pub fn plan_union<I: Inputs + ?Sized>(inputs: &I) -> Plan {
 pub fn plan_diff<I: Inputs + ?Sized>(inputs: &I) -> Plan {
     let mut slots = slot_pool::take();
     if inputs.is_empty() {
-        return Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES, double: false };
+        return Plan { op: Op::Diff, slots, scratch_bytes: SCRATCH_BYTES, double: false, leaf_agg: Vec::new() };
     }
     let mut a = inputs.cursor(0);
     let mut scratch = FoldScratch::take();
@@ -295,7 +413,7 @@ pub fn plan_diff<I: Inputs + ?Sized>(inputs: &I) -> Plan {
         slots.push(SlotPlan { key, capacity });
         a.advance();
     }
-    Plan { op: Op::Diff, double: wants_partner_major(Op::Diff, &slots), slots, scratch_bytes: SCRATCH_BYTES }
+    Plan { op: Op::Diff, double: wants_partner_major(Op::Diff, &slots), slots, scratch_bytes: SCRATCH_BYTES, leaf_agg: Vec::new() }
 }
 
 /// Smallest current key across cursors, or `None` when all are exhausted.

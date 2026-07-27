@@ -10,7 +10,7 @@
 use crate::format::*;
 use crate::ops::cursor::ContainerCursor;
 use crate::ops::analyze::decide;
-use crate::ops::analyze::plan::{wants_partner_major, Op, Plan, SlotPlan, SCRATCH_BYTES};
+use crate::ops::analyze::plan::{UnionAgg, wants_partner_major, Op, Plan, SlotPlan, SCRATCH_BYTES};
 use crate::FrozenBitmapView;
 
 /// One output container's analysis: arena slot ceiling + parent-facing bound.
@@ -70,7 +70,13 @@ pub fn view_shape(view: &FrozenBitmapView<'_>) -> Shape {
 pub fn to_plan(op: Op, shape: &Shape) -> Plan {
     let slots: Vec<SlotPlan> =
         shape.iter().map(|m| SlotPlan { key: m.key, capacity: m.cap }).collect();
-    Plan { op, double: wants_partner_major(op, &slots), slots, scratch_bytes: SCRATCH_BYTES }
+    Plan {
+        op,
+        double: wants_partner_major(op, &slots),
+        slots,
+        scratch_bytes: SCRATCH_BYTES,
+        leaf_agg: Vec::new(),
+    }
 }
 
 /// A merge cursor over a shape.
@@ -129,13 +135,25 @@ pub fn intersect_shape(inputs: &[Shape]) -> Shape {
 /// container and over-promoted. Callers now splice the sub-union's own operands
 /// in, so there is nothing left to weight.
 pub fn union_shape(inputs: &[Shape]) -> Shape {
+    union_shape_agg(inputs, &[], &mut Vec::new())
+}
+
+/// [`union_shape`], additionally recording the leaf-operand half of each key's
+/// aggregate into `agg`.
+///
+/// `exact[i]` marks input `i` as read from real containers rather than
+/// predicted; inputs beyond `exact`'s length count as exact. Pass an empty
+/// `exact` to skip the split entirely — `agg` is then left untouched.
+pub fn union_shape_agg(inputs: &[Shape], exact: &[bool], agg: &mut Vec<UnionAgg>) -> Shape {
+    let split = !exact.is_empty();
     let mut curs: Vec<Cur> = inputs.iter().map(Cur::new).collect();
     // A union spans at least the widest input's keys.
     let mut out = Vec::with_capacity(inputs.iter().map(Vec::len).max().unwrap_or(0));
     while let Some(key) = min_key(&curs) {
         let (mut sum, mut runs, mut any_bitmap, mut all_run, mut max_single, mut n) =
             (0u32, 0usize, false, true, 0u32, 0usize);
-        for c in curs.iter_mut() {
+        let mut leaf = UnionAgg::default();
+        for (i, c) in curs.iter_mut().enumerate() {
             if c.key() == Some(key) {
                 let m = c.take();
                 sum = sum.saturating_add(m.card);
@@ -144,7 +162,18 @@ pub fn union_shape(inputs: &[Shape]) -> Shape {
                 all_run &= m.typ == CT_RUN;
                 max_single = max_single.max(m.stored());
                 n += 1;
+                if split && exact.get(i).copied().unwrap_or(true) {
+                    leaf.sum_card = leaf.sum_card.saturating_add(m.card);
+                    leaf.total_runs += m.runs as u32;
+                    leaf.max_single = leaf.max_single.max(m.stored());
+                    leaf.n += 1;
+                    leaf.any_bitmap |= m.typ == CT_BITMAP;
+                    leaf.all_run &= m.typ == CT_RUN;
+                }
             }
+        }
+        if split {
+            agg.push(leaf);
         }
         let c = decide::union_key(
             &decide::UnionKey {

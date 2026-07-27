@@ -14,12 +14,13 @@
 
 use std::sync::{Arc, OnceLock};
 
+use crate::format::BITMAP_BYTES;
 use crate::ops::arena::OpArena;
 use crate::ops::cursor::ContainerCursor;
 use crate::ops::keymask::KeyMask;
 use crate::ops::kernels;
-use crate::ops::analyze::plan::{Op as PlanOp, Plan};
-use crate::ops::analyze::shape::{self, view_shape, Shape};
+use crate::ops::analyze::plan::{plan_union_observed, recycle, Op as PlanOp, Plan};
+use crate::ops::analyze::shape::{self, union_shape_agg, view_shape, Shape};
 use crate::ops::source::{view_container_count, Inputs};
 use crate::{FrozenBitmap, FrozenBitmapBuilder, FrozenBitmapView};
 
@@ -91,6 +92,11 @@ struct FoldPlan<'a> {
     /// a grandchild flattened into a child is already expanded in the child's
     /// `operands`, so it arrives fully expanded at the parent.
     operands: Vec<Shape>,
+    /// Parallel to `operands`: whether each was read from real containers (a
+    /// leaf) rather than predicted by a producing fold. Travels with `operands`
+    /// through flattening so a parent knows which halves of its aggregate are
+    /// settled facts.
+    operand_exact: Vec<bool>,
     max_depth: usize,
 }
 
@@ -175,9 +181,10 @@ impl<'a> FoldPlan<'a> {
     fn combine(op: Op, children: impl IntoIterator<Item = BitmapExpr<'a>>) -> Self {
         let mut steps = Vec::new();
         let mut shapes: Vec<Shape> = Vec::new();
+        let mut exact: Vec<bool> = Vec::new();
         let (mut arity, mut base, mut max_depth) = (0u32, 0usize, 0usize);
         for child in children {
-            let (net, depth, guardable) = splice(child, op, &mut steps, &mut shapes);
+            let (net, depth, guardable) = splice(child, op, &mut steps, &mut shapes, &mut exact);
             max_depth = max_depth.max(base + depth);
             base += net as usize;
             arity += net;
@@ -188,8 +195,22 @@ impl<'a> FoldPlan<'a> {
                 steps.push(Step::Guard { skip: u32::MAX, pop: base as u32 });
             }
         }
+        // A union over any predicted operand records the leaf half of each key's
+        // aggregate, so the executor can refold only the guessed half against
+        // what the producing fold really emitted.
+        let mut leaf_agg = Vec::new();
+        // Only when a predicted operand reserved bitmap-sized slots. That is the
+        // loose case — a bound that crossed ARRAY_MAX_SIZE — and the only one
+        // where refolding can shrink anything. Recording the split for every
+        // union with an intermediate cost 12% of analysis on unions that were
+        // already tight.
+        let split = op == Op::Or
+            && shapes.iter().zip(exact.iter()).any(|(sh, &e)| {
+                !e && sh.iter().any(|m| m.cap as usize >= BITMAP_BYTES)
+            });
         let (pop, shape) = match op {
             Op::And => (PlanOp::Intersect, shape::intersect_shape(&shapes)),
+            Op::Or if split => (PlanOp::Union, union_shape_agg(&shapes, &exact, &mut leaf_agg)),
             Op::Or => (PlanOp::Union, shape::union_shape(&shapes)),
             Op::Diff | Op::DiffLhs => unreachable!("combine is AND/OR only"),
         };
@@ -202,7 +223,10 @@ impl<'a> FoldPlan<'a> {
             && arity >= 2
             && shapes.iter().map(Vec::len).max().is_some_and(|w| shape.len() < w);
         let after = steps.len() + 1;
-        steps.push(Step::Combine(arity, shape::to_plan(pop, &shape), None));
+        let mut plan = shape::to_plan(pop, &shape);
+        debug_assert!(!split || leaf_agg.len() == plan.slots.len());
+        plan.leaf_agg = leaf_agg;
+        steps.push(Step::Combine(arity, plan, None));
         patch_guards(&mut steps, after);
         if narrows {
             // Push this AND's surviving keys down over its whole subtree: keys it
@@ -226,26 +250,40 @@ impl<'a> FoldPlan<'a> {
                 }
             }
         }
-        FoldPlan { steps, shape, operands: shapes, max_depth: max_depth.max(base).max(1) }
+        FoldPlan {
+            steps,
+            shape,
+            operands: shapes,
+            operand_exact: exact,
+            max_depth: max_depth.max(base).max(1),
+        }
     }
 
     /// `lhs` minus `rhs` (never flattened — DIFF is not associative).
     fn diff(lhs: BitmapExpr<'a>, rhs: BitmapExpr<'a>) -> Self {
         let mut steps = Vec::new();
         let mut shapes: Vec<Shape> = Vec::new();
-        let (n_lhs, d0, lhs_guardable) = splice(lhs, Op::DiffLhs, &mut steps, &mut shapes);
+        let mut exact: Vec<bool> = Vec::new();
+        let (n_lhs, d0, lhs_guardable) =
+            splice(lhs, Op::DiffLhs, &mut steps, &mut shapes, &mut exact);
         // An empty lhs makes the whole difference empty (the rhs only removes),
         // so guard it and skip evaluating the rhs.
         if lhs_guardable {
             steps.push(Step::Guard { skip: u32::MAX, pop: 1 });
         }
-        let (_, d1, _) = splice(rhs, Op::Diff, &mut steps, &mut shapes);
+        let (_, d1, _) = splice(rhs, Op::Diff, &mut steps, &mut shapes, &mut exact);
         let shape = shape::diff_shape(&shapes);
         let after = steps.len() + 1;
         steps.push(Step::Combine(n_lhs + 1, shape::to_plan(PlanOp::Diff, &shape), None));
         patch_guards(&mut steps, after);
         let n = n_lhs as usize;
-        FoldPlan { steps, shape, operands: shapes, max_depth: d0.max(n + d1).max(n + 1) }
+        FoldPlan {
+            steps,
+            shape,
+            operands: shapes,
+            operand_exact: exact,
+            max_depth: d0.max(n + d1).max(n + 1),
+        }
     }
 
     /// Run the manifest over a preallocated operand stack. Each `Combine` sizes
@@ -273,11 +311,28 @@ impl<'a> FoldPlan<'a> {
                 }
                 Step::Combine(arity, plan, slot) => {
                     let start = stack.len() - *arity as usize;
-                    let mut arena = OpArena::from_plan(plan);
                     // Built on first execute, then reused by every later one and
                     // shared with the rest of this AND's subtree.
                     let mask = slot.as_deref().map(MaskSrc::mask);
                     let inputs = Masked { accs: &stack[start..], mask };
+                    // A leaf's shape is read; an intermediate's is a bound, and
+                    // `|A ∩ B| <= min(|A|,|B|)` is only tight when one nests
+                    // inside the other — for independent dense containers the
+                    // truth is nearer `c1*c2/65536`. Crossing ARRAY_MAX_SIZE on
+                    // that bound reserves a flat 8 KiB for data needing 3.7 KiB,
+                    // and the parent then clears, scatters into and rescans all
+                    // of it. By now the operands are on the stack, so the guess
+                    // is refolded against fact — leaf contributions untouched.
+                    let observed = (!plan.leaf_agg.is_empty()
+                        && inputs.has_intermediate())
+                    .then(|| plan_union_observed(plan, &inputs));
+                    let mut arena =
+                        OpArena::from_plan(observed.as_ref().unwrap_or(plan));
+                    // `from_plan` copied what it needs; return the one-shot slot
+                    // buffer so a warm materialize still allocates nothing.
+                    if let Some(o) = observed {
+                        recycle(o);
+                    }
                     match plan.op {
                         PlanOp::Intersect => kernels::intersect_fold(&mut arena, &inputs),
                         PlanOp::Union => kernels::union_fold(&mut arena, &inputs),
@@ -386,6 +441,13 @@ struct Masked<'a, 'm> {
     mask: Option<&'m KeyMask>,
 }
 
+impl Masked<'_, '_> {
+    #[inline]
+    fn has_intermediate(&self) -> bool {
+        self.accs.iter().any(|a| matches!(a, Acc::Arena(_)))
+    }
+}
+
 impl Inputs for Masked<'_, '_> {
     #[inline]
     fn len(&self) -> usize {
@@ -409,6 +471,10 @@ impl Inputs for Masked<'_, '_> {
             Acc::Empty => 0,
         }
     }
+    #[inline]
+    fn is_intermediate(&self, i: usize) -> bool {
+        matches!(self.accs[i], Acc::Arena(_))
+    }
 }
 
 /// Append `child`'s steps to `steps`, flattening when it is a same-op sub-plan,
@@ -420,15 +486,18 @@ fn splice<'a>(
     parent: Op,
     steps: &mut Vec<Step<'a>>,
     shapes: &mut Vec<Shape>,
+    exact: &mut Vec<bool>,
 ) -> (u32, usize, bool) {
     match child.0 {
         Node::Leaf(v) => {
             shapes.push(view_shape(&v));
+            exact.push(true);
             steps.push(Step::Leaf(v));
             (1, 1, false)
         }
         Node::Owned(b) => {
             shapes.push(view_shape(&b.view()));
+            exact.push(true);
             steps.push(Step::Owned(b));
             (1, 1, false)
         }
@@ -477,12 +546,14 @@ fn splice<'a>(
                 // accumulators to bitmaps that the flat spelling never needed.
                 debug_assert_eq!(fp.operands.len(), k as usize, "operand count must equal arity");
                 shapes.append(&mut fp.operands);
+                exact.append(&mut fp.operand_exact);
                 (k, fp.max_depth, false)
             } else {
                 // A non-flattened subtree: a single operand whose result may be
                 // empty — the caller guards it. Here the merged shape *is* the
                 // operand, because the executor really does fold one container.
                 shapes.push(std::mem::take(&mut fp.shape));
+                exact.push(false); // a fold's result: described by a bound, not read
                 steps.append(&mut fp.steps);
                 (1, fp.max_depth, true)
             }
