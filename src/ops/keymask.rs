@@ -30,18 +30,4 @@ impl KeyMask {
     pub fn contains(&self, key: u16) -> bool {
         (self.words[key as usize >> 6] >> (key & 63)) & 1 == 1
     }
-
-    /// In-place intersection (AND of key sets).
-    pub fn intersect_with(&mut self, other: &KeyMask) {
-        for (a, b) in self.words.iter_mut().zip(other.words.iter()) {
-            *a &= *b;
-        }
-    }
-
-    /// In-place union (OR of key sets).
-    pub fn union_with(&mut self, other: &KeyMask) {
-        for (a, b) in self.words.iter_mut().zip(other.words.iter()) {
-            *a |= *b;
-        }
-    }
 }

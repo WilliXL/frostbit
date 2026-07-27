@@ -6,13 +6,9 @@ use std::collections::BTreeSet;
 use frostbit::{BitmapExpr, FrozenBitmap};
 use roaring::RoaringBitmap;
 
-fn splitmix64(s: &mut u64) -> u64 {
-    *s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *s;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
+mod support;
+use support::splitmix64;
+
 
 fn fz(values: &[u32]) -> FrozenBitmap {
     let mut b = frostbit::FrozenBitmapBuilder::new();
@@ -51,7 +47,7 @@ fn random_tree<'a>(
     pool: &'a Pool,
     depth: u32,
 ) -> (BitmapExpr<'a>, RoaringBitmap) {
-    if depth == 0 || splitmix64(st) % 3 == 0 {
+    if depth == 0 || splitmix64(st).is_multiple_of(3) {
         let i = (splitmix64(st) as usize) % pool.frozen.len();
         return (BitmapExpr::leaf(pool.frozen[i].view()), pool.roaring[i].clone());
     }
@@ -138,7 +134,6 @@ fn short_circuit_empty_subtree() {
         BitmapExpr::leaf(big.view()),
     ]);
     assert!(and.materialize().view().iter().next().is_none());
-    assert!(and.punch_holes().materialize().view().iter().next().is_none());
 
     // DIFF(∅, big) = ∅ — the lhs guard fires.
     let d = BitmapExpr::difference(
@@ -156,12 +151,12 @@ fn short_circuit_empty_subtree() {
     assert_eq!(got, (0..5000).collect::<Vec<_>>());
 }
 
-/// Hole-punching is result-preserving: an AND-rooted tree, punched, must yield
-/// exactly the roaring oracle. Roots are forced to N-way ANDs (the only shape
-/// `punch_holes` engages), with random — often OR/DIFF — branches underneath so
-/// the mask prunes dead keys inside nested subtrees.
+/// Auto hole-punching is result-preserving: an AND-rooted tree (the only shape
+/// the analyzer derives a mask for) must yield exactly the roaring oracle, with
+/// random — often OR/DIFF — branches underneath so the mask prunes dead keys
+/// inside nested subtrees.
 #[test]
-fn punched_and_trees_match_roaring() {
+fn and_root_trees_match_roaring() {
     let mut st = 0x50FF_2026_u64;
     let pool = Pool::new(&mut st, 12);
     for _ in 0..400 {
@@ -177,7 +172,60 @@ fn punched_and_trees_match_roaring() {
                 Some(a) => a & r,
             });
         }
-        let expr = BitmapExpr::and(exprs).punch_holes();
+        let expr = BitmapExpr::and(exprs);
         assert_tree(&expr, &acc.unwrap());
     }
+}
+
+/// Flattening must reach the *analyzer*, not just the step list.
+///
+/// A nested same-op tree and its flat spelling are the same operation, so they
+/// must plan identically — same operand count, same per-key accumulator forms,
+/// hence the same cost. When `splice` inlined a flattened child's steps but
+/// handed `combine` the child's merged shape, the executor folded k operands
+/// while the analyzer modelled one pre-unioned container carrying k operands'
+/// fan-in; that reads far denser than the truth and promoted array keys to
+/// bitmap accumulators, making nested ORs up to 10x their flat equivalent.
+///
+/// Results were always correct, so only timing could catch it. This asserts the
+/// structural property instead: identical results *and* an identical byte image,
+/// at any nesting depth, since the serialized container forms are what diverged.
+#[test]
+fn nested_same_op_plans_like_its_flat_spelling() {
+    let mut st = 0x11A7_2026_u64;
+    let pool = Pool::new(&mut st, 10);
+    let l = |i: usize| BitmapExpr::leaf(pool.frozen[i].view());
+
+    for (flat, nested) in [
+        (
+            BitmapExpr::or([l(0), l(1), l(2), l(3), l(4)]),
+            BitmapExpr::or([l(0), BitmapExpr::or([l(1), l(2), l(3), l(4)])]),
+        ),
+        (
+            // Right-deep: flattening has to be transitive, not one level.
+            BitmapExpr::or([l(5), l(6), l(7), l(8), l(9)]),
+            BitmapExpr::or([
+                l(5),
+                BitmapExpr::or([l(6), BitmapExpr::or([l(7), BitmapExpr::or([l(8), l(9)])])]),
+            ]),
+        ),
+        (
+            BitmapExpr::and([l(0), l(1), l(2), l(3)]),
+            BitmapExpr::and([BitmapExpr::and([l(0), l(1)]), BitmapExpr::and([l(2), l(3)])]),
+        ),
+    ] {
+        let (a, b) = (flat.materialize(), nested.materialize());
+        assert_eq!(a.view().iter().collect::<Vec<_>>(), b.view().iter().collect::<Vec<_>>());
+        assert_eq!(a.as_bytes(), b.as_bytes(), "nested picked different container forms");
+    }
+
+    // A DIFF between them must stay unflattened (not associative) yet still
+    // agree with the oracle, so the splice change cannot have leaked into it.
+    let d = BitmapExpr::difference(
+        BitmapExpr::or([l(0), BitmapExpr::or([l(1), l(2)])]),
+        BitmapExpr::or([l(3), l(4)]),
+    );
+    let want = (&(&pool.roaring[0] | &pool.roaring[1]) | &pool.roaring[2])
+        - (&pool.roaring[3] | &pool.roaring[4]);
+    assert_eq!(d.materialize().view().iter().collect::<Vec<_>>(), want.iter().collect::<Vec<_>>());
 }

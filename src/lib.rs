@@ -7,9 +7,12 @@
 //! Op producers come in two intents: `_fast` (op-ready, for query pipelines)
 //! and `_compact` (smallest, for persistence). The builder always finishes
 //! compact — built bitmaps are destined for storage.
-
-// Lower layers exist before their consumers during the incremental build-up.
-#![allow(dead_code)]
+//!
+//! **Fallibility.** Only one thing can fail: validating untrusted bytes, which
+//! returns `Option` ([`FrozenBitmapView::from_bytes`] / [`FrozenBitmap::from_bytes`]).
+//! Feeding the builder out-of-order values is a programmer error and panics
+//! ([`FrozenBitmapBuilder::push`]). Everything else — set ops,
+//! [`BitmapExpr::materialize`], and all queries on a valid bitmap — is infallible.
 
 /// Wire-format constants and byte primitives. Public only under `internals`.
 #[cfg(feature = "internals")]
@@ -17,23 +20,23 @@ pub mod format;
 #[cfg(not(feature = "internals"))]
 mod format;
 
-mod bitmap;
-pub use bitmap::FrozenBitmap;
-
-/// Container payload access. Public only under `internals`.
+/// Typed, zero-copy views of a container payload — the model `format`'s bytes
+/// decode into. Public only under `internals`.
 #[cfg(feature = "internals")]
 pub mod container;
 #[cfg(not(feature = "internals"))]
 mod container;
 
-mod builder;
-pub use builder::FrozenBitmapBuilder;
+mod api;
 
-mod view;
-pub use view::{FrozenBitmapView, Iter};
+pub use api::bitmap::FrozenBitmap;
+pub use api::builder::FrozenBitmapBuilder;
+pub use api::expr::BitmapExpr;
+pub use api::view::{FrozenBitmapView, Iter};
 
-mod expr;
-pub use expr::{BitmapExpr, FoldPlan};
+/// Working-memory budgeting, pre-allocation, and overflow policy.
+pub use api::pool;
+
 
 /// Set ops + their static analysis pass. The module is public only under
 /// `internals`; the stable entry points are re-exported below.
@@ -42,9 +45,12 @@ pub mod ops;
 #[cfg(not(feature = "internals"))]
 mod ops;
 
-/// Op-ready (`_fast`) set operations: results are standard-format, ready to
-/// feed the next op. Use the (forthcoming) `_compact` variants for storage.
-pub use ops::kernels::{diff as difference_fast, intersect as intersect_fast, union as union_fast};
+/// Free set operations in two intents: `_fast` results are op-ready standard
+/// container form (ideal for feeding the next op); `_compact` results are the
+/// smallest form (ideal for persistence). Both fold identically — they differ
+/// only in how the result is serialized.
+pub use ops::kernels::{
+    difference_compact, difference_fast, intersect_compact, intersect_fast, union_compact,
+    union_fast,
+};
 
-#[cfg(feature = "roaring")]
-mod convert;

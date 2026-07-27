@@ -8,10 +8,10 @@
 
 use std::time::Instant;
 
-#[path = "common.rs"]
+#[path = "support/common.rs"]
 mod common;
 use common::*;
-#[path = "treegen.rs"]
+#[path = "support/treegen.rs"]
 mod treegen;
 use treegen::*;
 
@@ -102,7 +102,15 @@ fn main() {
     eprintln!("auditing {} trees vs {RB} (threshold {THRESHOLD_US} µs, min of {REPS})…", specs.len());
 
     let mut offenders: Vec<(usize, f64, f64)> = Vec::new();
-    let (mut fb_total, mut rb_total) = (0f64, 0f64);
+    let (mut fb_total, mut rb_total, mut rbs_total) = (0f64, 0f64, 0f64);
+    // frostbit materializes a *serialized* FrozenBitmap; roaring returns its
+    // in-memory structure. That is the honest default — a query engine wants the
+    // frozen artifact — but it charges frostbit for a write roaring never makes,
+    // so the same corpus is also timed against roaring asked for the same
+    // artifact. Offenders are reported against the strict (unserialized) roaring;
+    // the like-for-like total says how much of any gap is the artifact.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut rbs_offenders = 0usize;
     for (i, spec) in specs.iter().enumerate() {
         let fb = best_us(|| {
             std::hint::black_box(build_fb(spec, &pool).materialize());
@@ -110,12 +118,30 @@ fn main() {
         let rb = best_us(|| {
             std::hint::black_box(eval_rb(spec, &pool));
         });
+        let rbs = best_us(|| {
+            let r = eval_rb(spec, &pool);
+            buf.clear();
+            r.serialize_into(&mut buf).unwrap();
+            std::hint::black_box(&buf);
+        });
         fb_total += fb;
         rb_total += rb;
+        rbs_total += rbs;
         if fb > rb + THRESHOLD_US {
             offenders.push((i, fb, rb));
         }
+        if fb > rbs + THRESHOLD_US {
+            rbs_offenders += 1;
+        }
     }
+    println!(
+        "\nlike-for-like (roaring also serializes): frostbit {:.1} ms, {RB}+ser {:.1} ms ({:.2}x)  |  offenders: {} of {}",
+        fb_total / 1e3,
+        rbs_total / 1e3,
+        rbs_total / fb_total,
+        rbs_offenders,
+        specs.len()
+    );
 
     offenders.sort_by(|a, b| (b.1 - b.2).total_cmp(&(a.1 - a.2)));
     println!(
@@ -139,8 +165,8 @@ fn main() {
             an += f.ands as f64;
             or_ += f.ors as f64;
             df += f.diffs as f64;
-            for k in 0..4 {
-                cl[k] += f.class[k] as f64;
+            for (c, &fc) in cl.iter_mut().zip(&f.class) {
+                *c += fc as f64;
             }
             wd = wd.max(f.max_width as f64);
         }

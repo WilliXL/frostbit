@@ -37,12 +37,13 @@ assert_eq!(v.len(), 3);
   and evaluates them from a fold plan built **once** at construction: same-op
   chains flatten to one N-way op, intermediates chain as pooled arenas
   (serialized only at the end), and a `materialize` allocates *only its result*.
-  **Hole-punching** prunes dead 64K blocks before folding — derived
-  automatically whenever the tree's root provably narrows a child
-  (`punch_holes()` forces it) — and an empty AND/DIFF subtree
-  **short-circuits** the rest of the tree.
-- **SIMD container kernels** (NEON / SSE with scalar fallbacks) plus
-  autovectorized word operations.
+  **Hole-punching** prunes dead 64K blocks before folding — the analyzer
+  derives it automatically, as part of the fold plan, whenever the tree's root
+  provably narrows a child — and an empty AND/DIFF subtree **short-circuits**
+  the rest of the tree.
+- **SIMD container kernels** (NEON on aarch64; SSE2 / SSSE3 / SSE4.1 / AVX2 /
+  AVX-512 on x86-64, feature-detected; scalar fallbacks) plus autovectorized
+  word operations.
 - **First-class `roaring` interop** behind the default `roaring` feature:
   `FrozenBitmap::from_roaring` / `to_roaring` and `From` conversions.
 
@@ -58,12 +59,12 @@ let mut b = FrozenBitmapBuilder::new();
 b.push(3);
 b.extend_sorted([70_000, 1 << 20]);
 let bm = b.finish();            // picks the smallest encoding (may be inline)
-// or: b.finish_standard()      // always the standard container format
 ```
 
 `finish()` produces the compact form for persistence. With the `roaring`
 feature, `FrozenBitmap::from_roaring(&rb)` / `bm.to_roaring()` (and `From`
-impls) convert to/from `roaring::RoaringBitmap` by container transcoding.
+impls) convert to/from `roaring::RoaringBitmap` by iterating values in
+ascending order.
 
 ### Wire format
 
@@ -73,7 +74,7 @@ Little-endian, two self-identifying encodings (v3):
 standard ("FROZ")                          inline ("FI")
  0  u32  MAGIC "FROZ"                       0  [u8;2] MAGIC "FI"
  4  u16  VERSION (3)                        2  u16    count
- 6  u16  FLAGS (has-runs, full)             4  ..     packed ascending u32s
+ 6  u16  FLAGS (has-runs, full, has-bitmap) 4  ..     packed ascending u32s
  8  u32  NUM_CONTAINERS
 12  u32  CARDINALITY (flag ⇒ 2^32)
 16  ..   container index (SoA, 8 B/container: key, type, cardinality, offset)
@@ -112,7 +113,10 @@ Flat N-way folds take a slice of views and produce an owned result in one pass:
 let out = intersect_fast(&[a.view(), b.view(), c.view()]);
 ```
 
-`_fast` results are in op-ready standard form, ideal for feeding the next op.
+`_fast` results are in op-ready standard form, ideal for feeding the next op;
+the matching `_compact` ops (`intersect_compact`, `union_compact`,
+`difference_compact`) return the smallest form for storage instead. Both fold
+identically — they differ only in how the result serializes.
 For boolean *trees*, build a `BitmapExpr` — construction **is** the analysis,
 so build once and `materialize()` per query:
 
@@ -123,21 +127,46 @@ let expr = BitmapExpr::and([
     BitmapExpr::leaf(base.view()),
     BitmapExpr::or([BitmapExpr::leaf(d0.view()), BitmapExpr::leaf(d1.view())]),
     BitmapExpr::difference(BitmapExpr::leaf(all.view()), BitmapExpr::leaf(lang.view())),
-])
-.punch_holes();                  // automatic for narrowing ANDs; this forces it
+]); // hole-punching for narrowing ANDs is automatic — part of the fold plan
 
 let result = expr.materialize(); // reuse `expr` for repeated evaluation
 ```
 
-### Pre-allocation
+### Working memory
 
-Nothing to configure: every working buffer — op arenas, fold cursors, the
-operand stack, and result buffers — lives in **per-thread pools**. The first
+Nothing to configure by default: every working buffer — op arenas, fold cursors,
+the operand stack, and result buffers — lives in **per-thread pools**. The first
 call on a thread allocates (sized by the op's fold plan); after that, ops take,
 fill, and return the same buffers, and results serialize **in place** inside
 the arena, so a steady-state op or `materialize()` performs **zero mallocs**.
 Cold paths degrade gracefully: an empty pool just allocates once and the
 buffer joins the cycle.
+
+When you *do* want an explicit bound on that memory, `frostbit::pool` gives you
+one — a budget, pre-allocation, and a policy for what happens if a fold needs
+more than the budget:
+
+```rust
+use frostbit::pool::{self, OnOverflow, PoolConfig};
+
+pool::configure(PoolConfig::new().buffers(16).buffer_bytes(1 << 20));
+pool::prewarm();                       // allocate the budget now, not on first op
+
+// ...or give the buffers an explicit shape:
+pool::configure(PoolConfig::new().buffer_sizes([4 << 20, 1 << 20, 1 << 20]));
+
+// Over-budget folds allocate a temporary and drop it on release (default), or
+// fail loudly — useful as a budget assertion in CI:
+pool::configure(PoolConfig::new().buffers(4).on_overflow(OnOverflow::Fail));
+
+let s = pool::stats();                 // live / retained / retained_bytes / overflows
+pool::clear();                         // hand the memory back when a worker idles
+```
+
+Budgets are **per-thread**, so there is no contention and no shared state:
+total working memory is bounded by `threads × budget`. To use frostbit under a
+thread pool, configure and pre-warm in the worker-start hook — `rayon`'s
+`start_handler` or `tokio`'s `on_thread_start`.
 
 ### File layout
 
@@ -173,7 +202,7 @@ src/
     source.rs    the Inputs abstraction (views, arenas) the kernels fold over
     keymask.rs   hole-punching live-key mask
     run.rs       native run-container ops
-    simd/        NEON / SSE kernels (merge, scan, bitmap words, popcount)
+    simd/        NEON / SSE / AVX kernels (merge, scan, bitmap words, popcount)
 tests/           differential + stress suites (vs roaring oracle)
 benchmarks/      criterion benches vs roaring
 ```
@@ -237,7 +266,7 @@ diff-heavy filters; 100 trees are guaranteed 100-leaf *and* 15-deep;
 
 | | frostbit | roaring |
 |---|---:|---:|
-| **Hole-punching** — narrow filter ∩ wide OR-groups | **7.4 µs** *(241 µs un-punched)* | 1.42 ms |
+| **Hole-punching** — narrow filter ∩ wide OR-groups | **7.4 µs** *(auto; ~240 µs of dead-block work skipped)* | 1.42 ms |
 | **Short-circuit** — AND with an empty subtree | **147 ns** | 705 µs |
 
 **N-way flat ops (8-way):**
@@ -289,7 +318,6 @@ two run-difference cells inside the noise band.
 ## Features
 
 - `roaring` *(default)* — conversions to/from `roaring::RoaringBitmap`.
-- `tracing` — opt-in trace logs for parse failures.
 - `internals` — exposes internal modules for white-box tests/benchmarks; not a
   stable API.
 

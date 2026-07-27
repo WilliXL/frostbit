@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-#[path = "common.rs"]
+#[path = "support/common.rs"]
 mod common;
 use common::*;
-#[path = "treegen.rs"]
+#[path = "support/treegen.rs"]
 mod treegen;
 use treegen::*;
 
@@ -21,7 +21,7 @@ use treegen::*;
 /// what a query engine pays per query; roaring re-evaluates recursively).
 fn corpus(c: &mut Criterion) {
     let pool = mixed_pool();
-    let specs = corpus_specs(25_000, pool.len());
+    let specs = corpus_specs(25_000, pool.len()); // 25k profiled + 25k family shapes
     let total_leaves: usize = specs.iter().map(count_leaves).sum();
 
     // Parity spot-check across the corpus (every 64th tree).
@@ -37,14 +37,24 @@ fn corpus(c: &mut Criterion) {
     g.warm_up_time(Duration::from_secs(2));
     g.measurement_time(Duration::from_secs(20));
     g.throughput(criterion::Throughput::Elements(specs.len() as u64));
-    g.bench_function("25k_trees/frostbit", |b| {
+    g.bench_function("50k_trees/frostbit", |b| {
         b.iter(|| {
             for spec in &specs {
                 black_box(build_fb(spec, &pool).materialize());
             }
         })
     });
-    g.bench_function(format!("25k_trees/{RB}"), |b| {
+    // Analysis alone: construct every tree (which *is* the analysis pass) and
+    // drop it without materializing. The gap to `25k_trees/frostbit` is what
+    // execution costs, so these two together say where corpus time goes.
+    g.bench_function("50k_trees/frostbit_analyze", |b| {
+        b.iter(|| {
+            for spec in &specs {
+                black_box(build_fb(spec, &pool));
+            }
+        })
+    });
+    g.bench_function(format!("50k_trees/{RB}"), |b| {
         b.iter(|| {
             for spec in &specs {
                 black_box(eval_rb(spec, &pool));
@@ -60,7 +70,7 @@ fn bench(c: &mut Criterion) {
     // Named shapes plus random trees across size classes.
     let mut specs: Vec<(String, Spec)> =
         named().into_iter().map(|(n, s)| (n.to_string(), s)).collect();
-    let mut st = 0xA11C_E5_u64;
+    let mut st = 0x00A1_1CE5_u64;
     for (cname, budget) in [("tiny", 3usize), ("small", 9), ("medium", 22), ("large", 45)] {
         for j in 0..2 {
             let spec = gen(&mut st, budget, pool.len());
@@ -91,8 +101,9 @@ fn bench(c: &mut Criterion) {
     g.finish();
 
     // Hole-punching: a key-selective AND — a narrow 4-block filter intersected
-    // with wide 256-block OR-groups. Punching derives the 4 surviving blocks
-    // from the narrow branch and prunes the wide branches to them before folding.
+    // with wide 256-block OR-groups. The analyzer auto-derives the 4 surviving
+    // blocks from the narrow branch and prunes the wide branches to them before
+    // folding (no explicit call — it's part of the fold plan).
     let mut st2 = 0xB0B0_CAFEu64;
     let sel = Set::new(&[
         band(0, 4, 1500, &mut st2),   // 0: narrow filter — 4 blocks
@@ -103,14 +114,11 @@ fn bench(c: &mut Criterion) {
     ]);
     let sel_spec = and(vec![leaf(0), or(vec![leaf(1), leaf(2)]), or(vec![leaf(3), leaf(4)])]);
     let want = rb_vec(&eval_rb(&sel_spec, &sel));
-    assert_eq!(fb_vec(&build_fb(&sel_spec, &sel).materialize()), want, "selective plain");
-    assert_eq!(fb_vec(&build_fb(&sel_spec, &sel).punch_holes().materialize()), want, "selective punched");
+    assert_eq!(fb_vec(&build_fb(&sel_spec, &sel).materialize()), want, "selective");
 
-    let unpunched = build_fb(&sel_spec, &sel);
-    let punched = build_fb(&sel_spec, &sel).punch_holes();
+    let expr = build_fb(&sel_spec, &sel);
     let mut h = c.benchmark_group("holepunch");
-    h.bench_function("selective/frostbit", |b| b.iter(|| black_box(unpunched.materialize())));
-    h.bench_function("selective/frostbit_punched", |b| b.iter(|| black_box(punched.materialize())));
+    h.bench_function("selective/frostbit", |b| b.iter(|| black_box(expr.materialize())));
     h.bench_function(format!("selective/{RB}"), |b| {
         b.iter(|| black_box(eval_rb(black_box(&sel_spec), &sel)))
     });

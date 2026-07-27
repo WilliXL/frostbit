@@ -1,21 +1,14 @@
 //! Fold inputs, unified over frozen leaves and working arenas.
 //!
 //! A tree evaluator folds a mix of zero-copy leaf views and intermediate
-//! [`OpArena`] results. Rather than serialize each intermediate back to bytes,
-//! an arena is read directly as an ordered container source. The [`Inputs`]
-//! trait lets the planner and kernels drive either kind through one code path,
-//! monomorphized per call site — no per-op wrapping allocation.
+//! [`OpArena`](crate::ops::arena::OpArena) results. Rather than serialize each
+//! intermediate back to bytes, an arena is read directly as an ordered
+//! container source. The [`Inputs`] trait lets the planner and kernels drive
+//! either kind through one code path, monomorphized per call site — no per-op
+//! wrapping allocation.
 
-use crate::ops::arena::OpArena;
 use crate::ops::cursor::ContainerCursor;
 use crate::FrozenBitmapView;
-
-/// One fold input: a frozen leaf or a working arena.
-#[derive(Clone, Copy)]
-pub enum Source<'a> {
-    View(FrozenBitmapView<'a>),
-    Arena(&'a OpArena),
-}
 
 /// A list of fold inputs the planner and kernels iterate uniformly.
 pub trait Inputs {
@@ -24,6 +17,12 @@ pub trait Inputs {
     fn cursor(&self, i: usize) -> ContainerCursor<'_>;
     /// Container count of input `i` (drives AND seed selection).
     fn container_count(&self, i: usize) -> usize;
+    /// Whether input `i` is another fold's result rather than a stored leaf —
+    /// i.e. whether the plan's description of it was a prediction.
+    #[inline]
+    fn is_intermediate(&self, _i: usize) -> bool {
+        false
+    }
     #[inline]
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -45,29 +44,9 @@ impl Inputs for [FrozenBitmapView<'_>] {
     }
 }
 
-impl Inputs for [Source<'_>] {
-    #[inline]
-    fn len(&self) -> usize {
-        <[_]>::len(self)
-    }
-    #[inline]
-    fn cursor(&self, i: usize) -> ContainerCursor<'_> {
-        match self[i] {
-            Source::View(v) => ContainerCursor::new(&v),
-            Source::Arena(a) => ContainerCursor::from_arena(a),
-        }
-    }
-    #[inline]
-    fn container_count(&self, i: usize) -> usize {
-        match self[i] {
-            Source::View(v) => view_container_count(&v),
-            Source::Arena(a) => a.container_count(),
-        }
-    }
-}
-
-// Forwards so a fold can be driven from an array or `Vec`, not just a slice
-// (generic call sites don't auto-unsize `&[T; N]` / `&Vec<T>` to `&[T]`).
+// Forwards so a fold can be driven from a fixed-size array or `Vec`, not just a
+// slice (generic call sites binding `&I` don't auto-unsize `&[T; N]` / `&Vec<T>`
+// to `&[T]`).
 impl<T, const N: usize> Inputs for [T; N]
 where
     [T]: Inputs,

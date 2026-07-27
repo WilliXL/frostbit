@@ -1,6 +1,6 @@
 //! Owned `FrozenBitmap`: ingest validation, alignment, equality, view access.
 
-use frostbit::{FrozenBitmap, FrozenBitmapBuilder};
+use frostbit::{union_fast, FrozenBitmap, FrozenBitmapBuilder};
 
 fn build(values: &[u32]) -> FrozenBitmap {
     let mut b = FrozenBitmapBuilder::new();
@@ -45,6 +45,29 @@ fn clone_and_eq() {
 }
 
 #[test]
+fn eq_is_set_equality_across_encodings() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // `{42}` as inline (builder picks the smallest encoding) vs standard (an op
+    // always emits standard form) — same set, different bytes.
+    let inline = build(&[42]);
+    let standard = union_fast(&[inline.view()]);
+    assert_ne!(inline.as_bytes(), standard.as_bytes(), "expected different encodings");
+    assert_eq!(inline, standard, "set-equal bitmaps must compare equal");
+
+    let hash = |b: &FrozenBitmap| {
+        let mut h = DefaultHasher::new();
+        b.hash(&mut h);
+        h.finish()
+    };
+    assert_eq!(hash(&inline), hash(&standard), "Hash must agree with set-equality");
+
+    // Different sets stay unequal.
+    assert_ne!(build(&[42]), build(&[43]));
+}
+
+#[test]
 fn view_access() {
     let bm = build(&[5, 100, 70_000]);
     let v = bm.view();
@@ -54,4 +77,23 @@ fn view_access() {
     // view() also works on ingested copies.
     let copy = FrozenBitmap::from_bytes(bm.as_bytes()).unwrap();
     assert_eq!(copy.view().len(), 3);
+}
+
+#[test]
+fn owned_read_api() {
+    // The owned type queries directly — `len()` is cardinality, not byte length
+    // (the old `Deref<[u8]>` footgun where `bm.len()` returned bytes is gone).
+    let bm = build(&[1, 2, 3, 70_000]);
+    assert_eq!(bm.len(), 4);
+    assert!(bm.byte_len() >= 16 && bm.byte_len() != 4);
+    assert!(!bm.is_empty());
+    assert!(bm.contains(70_000) && !bm.contains(5));
+    assert_eq!(bm.min(), Some(1));
+    assert_eq!(bm.max(), Some(70_000));
+    assert_eq!((&bm).into_iter().collect::<Vec<_>>(), vec![1, 2, 3, 70_000]);
+
+    let empty = FrozenBitmap::empty();
+    assert!(empty.is_empty());
+    assert_eq!(empty.len(), 0);
+    assert!(empty.min().is_none());
 }

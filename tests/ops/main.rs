@@ -4,6 +4,6 @@
 #![cfg(feature = "internals")]
 
 mod common;
-mod diff;
+mod difference;
 mod intersect;
 mod union;

@@ -3,8 +3,8 @@
 //! A container's bytes are reinterpreted as the natural typed slice for its
 //! kind — `&[u16]`, `&[u64; 1024]`, `&[Run]`, or `&[u32]` — via `bytemuck`,
 //! relying on the alignment the wire format guarantees (arrays 2-byte, bitmaps
-//! 64-byte, runs 2-byte, inline 4-byte). Kernels match on [`Data`] instead of
-//! decoding bytes by hand.
+//! 64-byte, runs 2-byte, inline 4-byte). Kernels match on the `Data` enum below
+//! instead of decoding bytes by hand.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -47,20 +47,32 @@ impl<'a> Data<'a> {
             CT_BITMAP => Data::Bitmap(as_bitmap(&bytes[..BITMAP_BYTES])),
             CT_RUN => {
                 let nr = read_u16(bytes, 0) as usize;
-                Data::Run(bytemuck::cast_slice(&bytes[2..2 + nr * 4]))
+                Data::Run(bytemuck::cast_slice(&bytes[2..run_bytes(nr)]))
             }
             CT_INLINE => Data::Inline(bytemuck::cast_slice(&bytes[..card as usize * 4])),
-            _ => Data::Array(&[]),
+            // The 2-bit type covers exactly these four; corrupt bytes are
+            // rejected by `from_bytes` before any kernel builds a `Data`.
+            _ => unreachable!("invalid container type {typ}"),
         }
     }
 
     /// Whether `lo` (a container-local low 16 bits) is present.
+    ///
+    /// Probes the typed payload directly — one branch on the container form,
+    /// then a binary search / bit test over a real slice. Callers that test
+    /// *many* values against one container should hoist the match instead (see
+    /// `retain_bitmap`), but for a single probe this is the fast path.
     #[inline]
     pub fn contains(&self, lo: u16) -> bool {
         match self {
             Data::Array(a) => a.binary_search(&lo).is_ok(),
-            Data::Bitmap(b) => bit(b, lo),
-            Data::Run(runs) => run_contains(runs, lo),
+            Data::Bitmap(b) => (b[lo as usize / 64] >> (lo % 64)) & 1 == 1,
+            Data::Run(runs) => {
+                // Runs are sorted by start; the last one starting at or before
+                // `lo` is the only one that can contain it.
+                let i = runs.partition_point(|r| r.start <= lo);
+                i > 0 && lo <= runs[i - 1].end()
+            }
             Data::Inline(ids) => ids.binary_search_by(|v| (*v as u16).cmp(&lo)).is_ok(),
         }
     }
@@ -126,13 +138,3 @@ pub fn as_bitmap_mut(bytes: &mut [u8]) -> &mut Bitmap {
     words.try_into().expect("bitmap payload is BITMAP_WORDS words")
 }
 
-#[inline]
-fn bit(b: &Bitmap, lo: u16) -> bool {
-    (b[lo as usize / 64] >> (lo as usize % 64)) & 1 == 1
-}
-
-fn run_contains(runs: &[Run], lo: u16) -> bool {
-    // Runs are sorted by start; find the last run starting at or before `lo`.
-    let i = runs.partition_point(|r| r.start <= lo);
-    i > 0 && lo <= runs[i - 1].end()
-}

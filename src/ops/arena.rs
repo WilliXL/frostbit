@@ -11,14 +11,14 @@
 //! input leaf sequentially.
 //!
 //! The working buffer and index vectors are reused across ops via a small
-//! thread-local pool (see [`pool`]), so steady-state `intersect`/`union`/`diff`
-//! allocate only their result.
+//! thread-local `pool`, so steady-state `intersect`/`union`/`diff` allocate only
+//! their result.
 
-use crate::bitmap::{aligned_buf, result_buf, AlignedBuf, FrozenBitmap};
+use crate::api::bitmap::{aligned_buf, result_buf, AlignedBuf, FrozenBitmap};
 use crate::container::Data;
 use crate::format::*;
 use crate::ops::cursor::ContainerRef;
-use crate::ops::plan::Plan;
+use crate::ops::analyze::plan::Plan;
 
 struct OutEntry {
     key: u16,
@@ -63,8 +63,15 @@ struct Reusable {
 
 impl Default for Reusable {
     fn default() -> Self {
+        Self::with_bytes(0)
+    }
+}
+
+impl Reusable {
+    /// Working memory with `bytes` of buffer capacity reserved up front.
+    fn with_bytes(bytes: usize) -> Self {
         Self {
-            buf: aligned_buf(0),
+            buf: aligned_buf(bytes),
             slot_off: Vec::new(),
             slot_sz: Vec::new(),
             slot_key: Vec::new(),
@@ -77,28 +84,37 @@ impl Default for Reusable {
 /// Thread-local reuse of arena working memory. A small stack handles the
 /// nesting that the expression-tree evaluator introduces.
 mod pool {
-    use std::cell::RefCell;
-
     use super::Reusable;
+    use crate::api::pool::Pool;
 
-    const MAX_POOLED: usize = 8;
     thread_local! {
-        static POOL: RefCell<Vec<Reusable>> = const { RefCell::new(Vec::new()) };
+        static POOL: Pool<Reusable> = const { Pool::new("arena") };
     }
 
     pub(super) fn take() -> Reusable {
-        POOL.with(|p| p.borrow_mut().pop()).unwrap_or_default()
+        POOL.with(|p| p.take(Reusable::default))
     }
 
     pub(super) fn put(r: Reusable) {
-        POOL.with(|p| {
-            let mut p = p.borrow_mut();
-            if p.len() < MAX_POOLED {
-                p.push(r);
-            }
-        });
+        POOL.with(|p| p.put(r));
+    }
+
+    pub(crate) fn prewarm(sizes: &[usize]) {
+        POOL.with(|p| p.prewarm(sizes, Reusable::with_bytes));
+    }
+
+    pub(crate) fn clear() {
+        POOL.with(Pool::clear);
+    }
+
+    pub(crate) fn stats() -> (usize, usize, usize) {
+        POOL.with(|p| p.stats(|r| r.buf.capacity()))
     }
 }
+
+pub(crate) use pool::{
+    clear as clear_arena_pool, prewarm as prewarm_arena_pool, stats as arena_pool_stats,
+};
 
 pub struct OpArena {
     buf: AlignedBuf,
@@ -322,11 +338,6 @@ impl OpArena {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.out.is_empty()
-    }
-
-    #[inline]
-    pub fn total_cardinality(&self) -> u64 {
-        self.total_card
     }
 
     /// Number of recorded containers — an arena read back as a container source.

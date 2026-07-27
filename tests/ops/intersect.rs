@@ -1,6 +1,6 @@
 //! Intersection kernel: value equality vs roaring across shapes/encodings.
 
-use frostbit::ops::kernels::intersect;
+use frostbit::ops::kernels::intersect_fast as intersect;
 
 use crate::common::*;
 

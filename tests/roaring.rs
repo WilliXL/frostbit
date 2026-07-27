@@ -8,13 +8,9 @@
 use frostbit::FrozenBitmap;
 use roaring::RoaringBitmap;
 
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
+mod support;
+use support::splitmix64;
+
 
 fn assert_roundtrips(rb: &RoaringBitmap) {
     let fz = FrozenBitmap::from_roaring(rb);
@@ -25,9 +21,10 @@ fn assert_roundtrips(rb: &RoaringBitmap) {
 
     let back = fz.to_roaring();
     assert_eq!(&back, rb, "roaring -> frozen -> roaring mismatch");
+    // Byte identity (stronger than the now set-based `PartialEq`): compare bytes.
     assert_eq!(
-        FrozenBitmap::from_roaring(&back),
-        fz,
+        FrozenBitmap::from_roaring(&back).as_bytes(),
+        fz.as_bytes(),
         "frozen -> roaring -> frozen not byte-identical"
     );
 }
@@ -106,7 +103,7 @@ fn ten_million_mixed() {
     let evens = RoaringBitmap::from_sorted_iter((4_000_000..10_000_000u32).filter(|v| v % 2 == 0))
         .unwrap();
     rb |= evens;
-    let mut st = 0x3133_7_u64;
+    let mut st = 0x0003_1337_u64;
     for _ in 0..1_000_000 {
         rb.insert(100_000_000 + (splitmix64(&mut st) % 900_000_000) as u32);
     }
