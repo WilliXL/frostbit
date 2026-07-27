@@ -89,6 +89,20 @@ impl<'a> ContainerCursor<'a> {
         c
     }
 
+    /// Like [`from_arena`](Self::from_arena), but hole-punched.
+    ///
+    /// Needed once a mask can differ between depths. With a single root mask an
+    /// intermediate never holds a dead key — every leaf under it was already
+    /// masked — so arenas could be read raw. A mask pushed down to an interior
+    /// AND is narrower than the one its subtree ran under, so its operands'
+    /// arenas *can* carry keys this fold must not see.
+    pub fn from_arena_live(arena: &'a OpArena, live: &'a KeyMask) -> Self {
+        let mut c = Self::from_arena(arena);
+        c.live = Some(live);
+        c.skip_dead();
+        c
+    }
+
     /// Read a working arena as an ordered container source (no serialization).
     pub fn from_arena(arena: &'a OpArena) -> Self {
         debug_assert!(arena.is_key_sorted(), "arena source must be key-ascending");

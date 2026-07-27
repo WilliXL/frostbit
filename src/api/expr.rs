@@ -36,7 +36,9 @@ enum Op {
 enum Step<'a> {
     Leaf(FrozenBitmapView<'a>),
     Owned(Arc<FrozenBitmap>),
-    Combine(u32, Plan),
+    /// A fold, plus the hole-punch mask its operands are read through. `None`
+    /// means no enclosing AND narrows this fold, so every key is live.
+    Combine(u32, Plan, Option<Arc<MaskSrc>>),
     /// Short-circuit guard for an AND/DIFF: if the operand just produced (top of
     /// stack) is empty, the whole op is empty — drop its `pop` partial operands,
     /// push an empty result, and jump `skip` steps forward (past the fold),
@@ -50,6 +52,30 @@ enum Step<'a> {
 ///
 /// Built once by the [`BitmapExpr`] combinators; run by [`FoldPlan::execute`]
 /// with no further analysis. Borrows the tree's leaves.
+/// The surviving key set of a narrowing AND, shared by `Arc` with every fold in
+/// that AND's subtree.
+///
+/// The keys are recorded rather than the mask itself because analysis runs for
+/// every tree while a `KeyMask` is 8 KiB: a `Vec<u16>` of survivors is cheap,
+/// and the mask is only materialized if the plan is actually executed.
+struct MaskSrc {
+    keys: Vec<u16>,
+    mask: OnceLock<KeyMask>,
+}
+
+impl MaskSrc {
+    #[inline]
+    fn mask(&self) -> &KeyMask {
+        self.mask.get_or_init(|| {
+            let mut m = KeyMask::empty();
+            for &k in &self.keys {
+                m.set(k);
+            }
+            m
+        })
+    }
+}
+
 #[derive(Clone)]
 struct FoldPlan<'a> {
     steps: Vec<Step<'a>>,
@@ -62,14 +88,6 @@ struct FoldPlan<'a> {
     /// `operands`, so it arrives fully expanded at the parent.
     operands: Vec<Shape>,
     max_depth: usize,
-    /// Whether this node is an AND whose key set is narrower than some child's
-    /// — the only shape where a hole-punch mask prunes anything.
-    narrows: bool,
-    /// The mask itself, built on first use. Only the *root* ever runs, and
-    /// splicing into a parent discards a child's mask, so deriving it during
-    /// analysis would allocate and fill 8 KiB for every interior AND and throw
-    /// all but one away. Built once here, then reused by every materialize.
-    live: OnceLock<Option<Arc<KeyMask>>>,
 }
 
 /// A boolean combination of frozen bitmaps. Build it with the
@@ -180,16 +198,31 @@ impl<'a> FoldPlan<'a> {
             && arity >= 2
             && shapes.iter().map(Vec::len).max().is_some_and(|w| shape.len() < w);
         let after = steps.len() + 1;
-        steps.push(Step::Combine(arity, shape::to_plan(pop, &shape)));
+        steps.push(Step::Combine(arity, shape::to_plan(pop, &shape), None));
         patch_guards(&mut steps, after);
-        FoldPlan {
-            steps,
-            shape,
-            operands: shapes,
-            max_depth: max_depth.max(base).max(1),
-            narrows,
-            live: OnceLock::new(),
+        if narrows {
+            // Push this AND's surviving keys down over its whole subtree: keys it
+            // drops cannot reach its output, so no fold beneath it need ever open
+            // those blocks. Only the *root* used to mask anything, which left
+            // `OR(AND(narrow, OR(wide, wide)), x)` paying full price — the
+            // interior AND narrows hard, but under a non-AND root there was no
+            // mask at all, so the inner OR built every key the AND would discard.
+            //
+            // Innermost wins; every plan stays a *superset* of what its cursors
+            // can yield, which is the invariant that makes this safe. Folds are
+            // planned unmasked and a mask only removes keys, so a kernel walking
+            // its plan alongside a masked cursor can skip but never run short.
+            let src = Arc::new(MaskSrc {
+                keys: shape.iter().map(|m| m.key).collect(),
+                mask: OnceLock::new(),
+            });
+            for step in steps.iter_mut() {
+                if let Step::Combine(_, _, slot @ None) = step {
+                    *slot = Some(Arc::clone(&src));
+                }
+            }
         }
+        FoldPlan { steps, shape, operands: shapes, max_depth: max_depth.max(base).max(1) }
     }
 
     /// `lhs` minus `rhs` (never flattened — DIFF is not associative).
@@ -206,16 +239,9 @@ impl<'a> FoldPlan<'a> {
         let (_, d1, _) = splice(rhs, Op::Diff, &mut steps, &mut shapes);
         let shape = shape::diff_shape(&shapes);
         let after = steps.len() + 1;
-        steps.push(Step::Combine(2, shape::to_plan(PlanOp::Diff, &shape)));
+        steps.push(Step::Combine(2, shape::to_plan(PlanOp::Diff, &shape), None));
         patch_guards(&mut steps, after);
-        FoldPlan {
-            steps,
-            shape,
-            operands: shapes,
-            max_depth: d0.max(1 + d1).max(2),
-            narrows: false,
-            live: OnceLock::new(),
-        }
+        FoldPlan { steps, shape, operands: shapes, max_depth: d0.max(1 + d1).max(2) }
     }
 
     /// Run the manifest over a preallocated operand stack. Each `Combine` sizes
@@ -227,20 +253,6 @@ impl<'a> FoldPlan<'a> {
         let mut guard = ExecStack::take();
         let stack = guard.borrow();
         stack.reserve(self.max_depth);
-        // Derive the hole-punch mask on first run and keep it for every later
-        // materialize (see `live`).
-        let mask = self
-            .live
-            .get_or_init(|| {
-                self.narrows.then(|| {
-                    let mut m = KeyMask::empty();
-                    for meta in &self.shape {
-                        m.set(meta.key);
-                    }
-                    Arc::new(m)
-                })
-            })
-            .as_deref();
         let mut pc = 0;
         while pc < self.steps.len() {
             match &self.steps[pc] {
@@ -255,9 +267,12 @@ impl<'a> FoldPlan<'a> {
                         continue;
                     }
                 }
-                Step::Combine(arity, plan) => {
+                Step::Combine(arity, plan, slot) => {
                     let start = stack.len() - *arity as usize;
                     let mut arena = OpArena::from_plan(plan);
+                    // Built on first execute, then reused by every later one and
+                    // shared with the rest of this AND's subtree.
+                    let mask = slot.as_deref().map(MaskSrc::mask);
                     let inputs = Masked { accs: &stack[start..], mask };
                     match plan.op {
                         PlanOp::Intersect => kernels::intersect_fold(&mut arena, &inputs),
@@ -377,7 +392,8 @@ impl Inputs for Masked<'_, '_> {
         match (&self.accs[i], self.mask) {
             (Acc::Leaf(v), Some(mask)) => ContainerCursor::new_live(v, mask),
             (Acc::Leaf(v), None) => ContainerCursor::new(v),
-            (Acc::Arena(a), _) => ContainerCursor::from_arena(a),
+            (Acc::Arena(a), Some(mask)) => ContainerCursor::from_arena_live(a, mask),
+            (Acc::Arena(a), None) => ContainerCursor::from_arena(a),
             (Acc::Empty, _) => ContainerCursor::empty(),
         }
     }
@@ -414,7 +430,7 @@ fn splice<'a>(
         }
         Node::Combined(mut fp) => {
             let root = fp.steps.last().map(|s| match s {
-                Step::Combine(_, p) => p.op,
+                Step::Combine(_, p, _) => p.op,
                 _ => unreachable!("a plan always ends in a Combine"),
             });
             let flatten = matches!(
@@ -422,7 +438,7 @@ fn splice<'a>(
                 (Op::And, Some(PlanOp::Intersect)) | (Op::Or, Some(PlanOp::Union))
             );
             if flatten {
-                let Some(Step::Combine(k, _)) = fp.steps.pop() else { unreachable!() };
+                let Some(Step::Combine(k, _, _)) = fp.steps.pop() else { unreachable!() };
                 // Inlining moves these steps up, so the child's own guards (which
                 // jumped to its now-popped Combine) no longer apply — drop them.
                 // The flattened operands are guarded, if at all, by this op.
