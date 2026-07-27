@@ -27,7 +27,11 @@ use crate::{FrozenBitmap, FrozenBitmapBuilder, FrozenBitmapView};
 enum Op {
     And,
     Or,
-    Diff, // only used as a never-flatten parent for DIFF operands
+    Diff, // a DIFF's subtrahend position — never flattens
+    /// A DIFF's *minuend* position. `(x \\ y) \\ z == x \\ (y, z)`, so a
+    /// left-nested chain can collapse into one N-way first-minus-rest. Only
+    /// here: `x \\ (y \\ z)` is a different set and must stay nested.
+    DiffLhs,
 }
 
 /// One linearized instruction: push a leaf, or pop `arity` operands and fold
@@ -187,7 +191,7 @@ impl<'a> FoldPlan<'a> {
         let (pop, shape) = match op {
             Op::And => (PlanOp::Intersect, shape::intersect_shape(&shapes)),
             Op::Or => (PlanOp::Union, shape::union_shape(&shapes)),
-            Op::Diff => unreachable!("combine is AND/OR only"),
+            Op::Diff | Op::DiffLhs => unreachable!("combine is AND/OR only"),
         };
         // Auto hole-punch applies when this AND's intersected key set is
         // narrower than some child's: a mask over the surviving keys provably
@@ -228,9 +232,8 @@ impl<'a> FoldPlan<'a> {
     /// `lhs` minus `rhs` (never flattened — DIFF is not associative).
     fn diff(lhs: BitmapExpr<'a>, rhs: BitmapExpr<'a>) -> Self {
         let mut steps = Vec::new();
-        // Op::Diff never flattens, so each splice contributes exactly one operand.
         let mut shapes: Vec<Shape> = Vec::new();
-        let (_, d0, lhs_guardable) = splice(lhs, Op::Diff, &mut steps, &mut shapes);
+        let (n_lhs, d0, lhs_guardable) = splice(lhs, Op::DiffLhs, &mut steps, &mut shapes);
         // An empty lhs makes the whole difference empty (the rhs only removes),
         // so guard it and skip evaluating the rhs.
         if lhs_guardable {
@@ -239,9 +242,10 @@ impl<'a> FoldPlan<'a> {
         let (_, d1, _) = splice(rhs, Op::Diff, &mut steps, &mut shapes);
         let shape = shape::diff_shape(&shapes);
         let after = steps.len() + 1;
-        steps.push(Step::Combine(2, shape::to_plan(PlanOp::Diff, &shape), None));
+        steps.push(Step::Combine(n_lhs + 1, shape::to_plan(PlanOp::Diff, &shape), None));
         patch_guards(&mut steps, after);
-        FoldPlan { steps, shape, operands: shapes, max_depth: d0.max(1 + d1).max(2) }
+        let n = n_lhs as usize;
+        FoldPlan { steps, shape, operands: shapes, max_depth: d0.max(n + d1).max(n + 1) }
     }
 
     /// Run the manifest over a preallocated operand stack. Each `Combine` sizes
@@ -433,10 +437,29 @@ fn splice<'a>(
                 Step::Combine(_, p, _) => p.op,
                 _ => unreachable!("a plan always ends in a Combine"),
             });
-            let flatten = matches!(
-                (parent, root),
-                (Op::And, Some(PlanOp::Intersect)) | (Op::Or, Some(PlanOp::Union))
-            );
+            // Does this node carry a guard of its own — one aimed at the Combine
+            // about to be popped, as opposed to a deeper one already aimed at its
+            // own fold?
+            let end = fp.steps.len() - 1;
+            let chain_guarded = fp.steps.iter().enumerate().any(|(i, st)| match st {
+                Step::Guard { skip, .. } => i + *skip as usize == end,
+                _ => false,
+            });
+            let flatten = match (parent, root) {
+                (Op::And, Some(PlanOp::Intersect)) | (Op::Or, Some(PlanOp::Union)) => true,
+                // `((x \ y) \ z) == x \ (y, z)`: one N-way first-minus-rest
+                // instead of a materialized intermediate per link.
+                //
+                // Only for a chain with no guard of its own. Splicing drops the
+                // child's guards, and a DIFF's guard is worth more than the
+                // intermediate it would save: flattening every chain measured
+                // 2.2% slower precisely because chains stopped short-circuiting
+                // on an empty minuend. A leaf minuend is never guardable, so
+                // those chains have nothing to give up; a guarded chain stays
+                // nested and keeps its short-circuit.
+                (Op::DiffLhs, Some(PlanOp::Diff)) => !chain_guarded,
+                _ => false,
+            };
             if flatten {
                 let Some(Step::Combine(k, _, _)) = fp.steps.pop() else { unreachable!() };
                 // Inlining moves these steps up, so the child's own guards (which
