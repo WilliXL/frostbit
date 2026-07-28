@@ -209,12 +209,16 @@ wide flat ORs, diff-heavy filters, and ten additional shape families:
 
 Analysis accounts for 11% of frostbit's corpus time; the rest is execution.
 
-### Query-shape optimizations
+### Work-skipping
 
-| | speedup |
+Blocks that cannot reach the result are pruned beneath any narrowing AND, and
+evaluation stops as soon as an AND or DIFF operand is known empty. Both fall out
+of the fold plan and need no user action.
+
+| tree | speedup |
 |---|---:|
-| hole-punching — narrow filter ∩ wide OR-groups | 209× |
-| short-circuit — AND with an empty subtree | >1000× |
+| `narrow ∩ (w₁ ∪ w₂) ∩ (w₃ ∪ w₄)` — 4 live blocks, 256 per `w` | 209× |
+| `(a \ a) ∩ (b ∪ c ∪ d)` — left operand empty, right never evaluated | >1000× |
 
 ### Flat N-way operations (8-way)
 
