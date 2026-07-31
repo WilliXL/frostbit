@@ -289,8 +289,20 @@ pub struct Index<'a> {
 
 impl<'a> Index<'a> {
     /// Borrow the index of an `n`-container standard bitmap.
+    ///
+    /// `bytes` must start at a [`WORD_ALIGN`]-aligned address — the index is
+    /// reinterpreted as `u16`/`u32` slices zero-copy, and the format places
+    /// them at aligned offsets *from the base*. Both `from_bytes` boundaries
+    /// reject under-aligned buffers before an `Index` can exist, so inside the
+    /// crate this holds by construction; the assert catches a caller (a test,
+    /// an `internals` user) handing in a bare `Vec<u8>`, which the allocator
+    /// does not align on every platform Miri models.
     #[inline]
     pub fn new(bytes: &'a [u8], n: usize) -> Self {
+        debug_assert!(
+            (bytes.as_ptr() as usize).is_multiple_of(WORD_ALIGN),
+            "index base must be WORD_ALIGN-aligned (from_bytes enforces this)"
+        );
         Index {
             keys: bytemuck::cast_slice(&bytes[keys_off()..keys_off() + 2 * n]),
             cards: bytemuck::cast_slice(&bytes[cards_off(n)..cards_off(n) + 2 * n]),

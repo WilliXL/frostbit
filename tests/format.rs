@@ -189,9 +189,13 @@ fn sample_entries() -> Vec<IndexEntry> {
     ]
 }
 
-fn build_index(entries: &[IndexEntry]) -> Vec<u8> {
+/// A `WORD_ALIGN`-aligned index buffer. `Index::new` requires the alignment
+/// both `from_bytes` boundaries enforce; a bare `Vec<u8>` only appears to
+/// satisfy it because allocators over-align — under Miri it does not.
+fn build_index(entries: &[IndexEntry]) -> aligned_vec::AVec<u8> {
     let n = entries.len();
-    let mut buf = vec![0u8; HEADER_SIZE + index_size(n)];
+    let mut buf = aligned_vec::AVec::new(WORD_ALIGN);
+    buf.resize(HEADER_SIZE + index_size(n), 0u8);
     for (i, e) in entries.iter().enumerate() {
         write_index_entry(&mut buf, n, i, *e);
     }
