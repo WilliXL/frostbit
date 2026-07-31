@@ -24,7 +24,7 @@ pub fn array_intersect(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     if lo.saturating_mul(hi.ilog2().max(1) as usize) * 8 < hi {
         return intersect_gallop(a, b, out);
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     unsafe {
         // Balanced → shuffle-merge; moderate skew → galloping broadcast-scan.
         if lo >= 8 && hi <= lo * MERGE_MAX_RATIO {
@@ -32,7 +32,7 @@ pub fn array_intersect(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
         }
         return intersect_neon(a, b, out);
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     unsafe {
         // Balanced → shuffle-merge (SSSE3, for the byte-rotate); moderate skew →
         // galloping broadcast-scan.
@@ -81,7 +81,7 @@ fn intersect_gallop(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
 /// emit `a`'s matched lanes, and advance whichever block's max is smaller. One
 /// horizontal reduction per 8 elements instead of the broadcast-scan's per
 /// element — the win on balanced inputs. A scalar two-pointer finishes the tail.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[target_feature(enable = "neon")]
 unsafe fn intersect_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     use std::arch::aarch64::*;
@@ -220,7 +220,7 @@ fn broadcast_scan<const W: usize>(
     k
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[target_feature(enable = "neon")]
 unsafe fn intersect_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     broadcast_scan::<8>(a, b, out, |freq, f, v| unsafe { crate::ops::simd::common::window_has_neon(freq, f, v) })
@@ -229,7 +229,7 @@ unsafe fn intersect_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
 /// SSSE3 twin of [`intersect_merge_neon`]: the same shuffle-merge, with
 /// `_mm_alignr_epi8` for the lane rotate (direction is irrelevant — all 8
 /// rotations are OR-ed) and `packs`+`movemask` for the lane mask.
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "ssse3")]
 unsafe fn intersect_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     use std::arch::x86_64::*;
@@ -302,13 +302,13 @@ unsafe fn intersect_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     k + intersect_scalar(&a[ia..], &b[ib..], &mut out[k..])
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "sse2")]
 unsafe fn intersect_sse2(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     broadcast_scan::<8>(a, b, out, |freq, f, v| unsafe { crate::ops::simd::common::window_has_sse2(freq, f, v) })
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
 unsafe fn intersect_avx2(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     broadcast_scan::<16>(a, b, out, |freq, f, v| unsafe { crate::ops::simd::common::window_has_avx2(freq, f, v) })

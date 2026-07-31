@@ -3,7 +3,7 @@
 //! hits) and [`super::array_diff`] (keep misses). Callers guarantee
 //! `f + W <= freq.len()` and that the relevant CPU feature is present.
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[target_feature(enable = "neon")]
 pub(crate) unsafe fn window_has_neon(freq: &[u16], f: usize, v: u16) -> bool {
     use std::arch::aarch64::*;
@@ -11,7 +11,7 @@ pub(crate) unsafe fn window_has_neon(freq: &[u16], f: usize, v: u16) -> bool {
     vmaxvq_u16(vceqq_u16(win, vdupq_n_u16(v))) != 0
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "sse2")]
 pub(crate) unsafe fn window_has_sse2(freq: &[u16], f: usize, v: u16) -> bool {
     use std::arch::x86_64::*;
@@ -19,7 +19,7 @@ pub(crate) unsafe fn window_has_sse2(freq: &[u16], f: usize, v: u16) -> bool {
     _mm_movemask_epi8(_mm_cmpeq_epi16(win, _mm_set1_epi16(v as i16))) != 0
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
 pub(crate) unsafe fn window_has_avx2(freq: &[u16], f: usize, v: u16) -> bool {
     use std::arch::x86_64::*;

@@ -9,6 +9,11 @@
 //! selects among the ISAs at runtime (a cached load). NEON is baseline on
 //! aarch64, so that path has no runtime check. There is always a portable
 //! scalar fallback, so the same code is correct on every target.
+//!
+//! Every arch gate also carries `not(miri)`: Miri cannot interpret LLVM arch
+//! intrinsics (`vaddlvq_u16` was the first to abort), so under Miri all
+//! kernels take their scalar fallback. The arena and accumulator unsafe the
+//! kernels drive is shared by both paths, which is what Miri is there to check.
 
 pub mod common;
 mod difference;

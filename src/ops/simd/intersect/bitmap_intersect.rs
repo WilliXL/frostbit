@@ -1,13 +1,13 @@
 //! Bitmap intersection: `dst &= src`, plus a fused-popcount variant.
 
 use crate::container::Bitmap;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 use crate::format::BITMAP_WORDS;
 
 /// `dst &= src`, returning the result's population count in one pass.
 #[inline]
 pub fn and_count(dst: &mut Bitmap, src: &Bitmap) -> u32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     unsafe {
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vpopcntdq") {
             return and_count_avx512(dst, src);
@@ -17,7 +17,7 @@ pub fn and_count(dst: &mut Bitmap, src: &Bitmap) -> u32 {
         }
         return and_count_sse2(dst, src);
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     unsafe {
         return crate::ops::simd::common::fold_count_neon(dst, src, |a, b| std::arch::aarch64::vandq_u64(a, b));
     }
@@ -34,7 +34,7 @@ fn and_count_scalar(dst: &mut Bitmap, src: &Bitmap) -> u32 {
     c
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "sse2")]
 unsafe fn and_sse2(dst: &mut Bitmap, src: &Bitmap) {
     use std::arch::x86_64::*;
@@ -45,7 +45,7 @@ unsafe fn and_sse2(dst: &mut Bitmap, src: &Bitmap) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
 unsafe fn and_avx2(dst: &mut Bitmap, src: &Bitmap) {
     use std::arch::x86_64::*;
@@ -56,21 +56,21 @@ unsafe fn and_avx2(dst: &mut Bitmap, src: &Bitmap) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "sse2")]
 unsafe fn and_count_sse2(dst: &mut Bitmap, src: &Bitmap) -> u32 {
     and_sse2(dst, src);
     dst.iter().map(|w| w.count_ones()).sum()
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
 unsafe fn and_count_avx2(dst: &mut Bitmap, src: &Bitmap) -> u32 {
     and_avx2(dst, src);
     dst.iter().map(|w| w.count_ones()).sum()
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
 unsafe fn and_count_avx512(dst: &mut Bitmap, src: &Bitmap) -> u32 {
     use std::arch::x86_64::*;

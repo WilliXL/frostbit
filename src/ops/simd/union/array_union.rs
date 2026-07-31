@@ -11,13 +11,13 @@ use crate::ops::simd::common::MERGE_MAX_RATIO;
 /// `a ∪ b` for sorted, unique slices, deduping. Returns the result length.
 pub fn array_union(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     let (lo, hi) = if a.len() <= b.len() { (a.len(), b.len()) } else { (b.len(), a.len()) };
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     unsafe {
         if lo >= 8 && hi <= lo * MERGE_MAX_RATIO {
             return union_merge_neon(a, b, out);
         }
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     unsafe {
         if lo >= 8 && hi <= lo * MERGE_MAX_RATIO && is_x86_feature_detected!("sse4.1") {
             return union_merge_sse(a, b, out);
@@ -72,7 +72,7 @@ fn union_tail(carry: &[u16], a: &[u16], b: &[u16], out: &mut [u16], mut k: usize
 
 /// Merge two sorted 8-lane vectors into `(low 8, high 8)`, both sorted, via the
 /// Inoue–Taura rotate network.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 unsafe fn simd_merge_neon(
     a: std::arch::aarch64::uint16x8_t,
@@ -95,7 +95,7 @@ unsafe fn simd_merge_neon(
 
 /// Emit `new`'s lanes that differ from their predecessor (`prev`'s last lane
 /// bridges the block boundary), compacted by table shuffle.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 unsafe fn emit_unique_neon(
     prev: std::arch::aarch64::uint16x8_t,
@@ -127,7 +127,7 @@ unsafe fn emit_unique_neon(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[target_feature(enable = "neon")]
 unsafe fn union_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     use std::arch::aarch64::*;
@@ -175,7 +175,7 @@ unsafe fn union_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
 
 // --- x86_64 -----------------------------------------------------------------
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[inline]
 #[target_feature(enable = "sse4.1")]
 unsafe fn simd_merge_sse(
@@ -198,7 +198,7 @@ unsafe fn simd_merge_sse(
     (min, max)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[inline]
 #[target_feature(enable = "sse4.1")]
 unsafe fn emit_unique_sse(
@@ -230,7 +230,7 @@ unsafe fn emit_unique_sse(
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "sse4.1")]
 unsafe fn union_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     use std::arch::x86_64::*;

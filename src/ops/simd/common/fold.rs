@@ -10,7 +10,7 @@ use crate::format::BITMAP_WORDS;
 // do this for non-baseline features, so its loops are written out per op.
 
 /// `dst = combine(dst, src)` word-by-word (two `u64` lanes per step).
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[target_feature(enable = "neon")]
 pub(crate) unsafe fn fold_neon(
     dst: &mut Bitmap,
@@ -26,7 +26,7 @@ pub(crate) unsafe fn fold_neon(
 
 /// `dst = combine(dst, src)` with a fused population count of the result. Per-
 /// byte `CNT` accumulated into `u16` lanes (`vpadalq_u8`), reduced once.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[target_feature(enable = "neon")]
 pub(crate) unsafe fn fold_count_neon(
     dst: &mut Bitmap,

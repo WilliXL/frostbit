@@ -9,14 +9,14 @@ use crate::format::BITMAP_WORDS;
 
 #[inline]
 pub fn popcount(b: &Bitmap) -> u32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     unsafe {
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vpopcntdq") {
             return popcount_avx512(b);
         }
         return popcount_scalar(b);
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     unsafe {
         return popcount_neon(b);
     }
@@ -28,7 +28,7 @@ fn popcount_scalar(b: &Bitmap) -> u32 {
     b.iter().map(|w| w.count_ones()).sum()
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[target_feature(enable = "neon")]
 unsafe fn popcount_neon(b: &Bitmap) -> u32 {
     use std::arch::aarch64::*;
@@ -40,7 +40,7 @@ unsafe fn popcount_neon(b: &Bitmap) -> u32 {
     vaddlvq_u16(acc)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
 unsafe fn popcount_avx512(b: &Bitmap) -> u32 {
     use std::arch::x86_64::*;

@@ -1,13 +1,13 @@
 //! Bitmap union: `dst |= src`, plus a fused-popcount variant.
 
 use crate::container::Bitmap;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 use crate::format::BITMAP_WORDS;
 
 /// `dst |= src`.
 #[inline]
 pub fn or(dst: &mut Bitmap, src: &Bitmap) {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     unsafe {
         if is_x86_feature_detected!("avx512f") {
             return or_avx512(dst, src);
@@ -17,7 +17,7 @@ pub fn or(dst: &mut Bitmap, src: &Bitmap) {
         }
         return or_sse2(dst, src);
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     unsafe {
         return crate::ops::simd::common::fold_neon(dst, src, |a, b| std::arch::aarch64::vorrq_u64(a, b));
     }
@@ -28,7 +28,7 @@ pub fn or(dst: &mut Bitmap, src: &Bitmap) {
 /// `dst |= src`, returning the result's population count in one pass.
 #[inline]
 pub fn or_count(dst: &mut Bitmap, src: &Bitmap) -> u32 {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     unsafe {
         if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512vpopcntdq") {
             return or_count_avx512(dst, src);
@@ -38,7 +38,7 @@ pub fn or_count(dst: &mut Bitmap, src: &Bitmap) -> u32 {
         }
         return or_count_sse2(dst, src);
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     unsafe {
         return crate::ops::simd::common::fold_count_neon(dst, src, |a, b| std::arch::aarch64::vorrq_u64(a, b));
     }
@@ -61,7 +61,7 @@ fn or_count_scalar(dst: &mut Bitmap, src: &Bitmap) -> u32 {
     c
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "sse2")]
 unsafe fn or_sse2(dst: &mut Bitmap, src: &Bitmap) {
     use std::arch::x86_64::*;
@@ -72,7 +72,7 @@ unsafe fn or_sse2(dst: &mut Bitmap, src: &Bitmap) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
 unsafe fn or_avx2(dst: &mut Bitmap, src: &Bitmap) {
     use std::arch::x86_64::*;
@@ -83,7 +83,7 @@ unsafe fn or_avx2(dst: &mut Bitmap, src: &Bitmap) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx512f")]
 unsafe fn or_avx512(dst: &mut Bitmap, src: &Bitmap) {
     use std::arch::x86_64::*;
@@ -94,21 +94,21 @@ unsafe fn or_avx512(dst: &mut Bitmap, src: &Bitmap) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "sse2")]
 unsafe fn or_count_sse2(dst: &mut Bitmap, src: &Bitmap) -> u32 {
     or_sse2(dst, src);
     dst.iter().map(|w| w.count_ones()).sum()
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
 unsafe fn or_count_avx2(dst: &mut Bitmap, src: &Bitmap) -> u32 {
     or_avx2(dst, src);
     dst.iter().map(|w| w.count_ones()).sum()
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx512f,avx512vpopcntdq")]
 unsafe fn or_count_avx512(dst: &mut Bitmap, src: &Bitmap) -> u32 {
     use std::arch::x86_64::*;

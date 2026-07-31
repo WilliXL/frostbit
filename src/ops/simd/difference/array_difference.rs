@@ -12,7 +12,7 @@ use crate::ops::simd::common::{COMPACT, MERGE_MAX_RATIO};
 /// `a \ b` for sorted, unique slices. Returns the result length.
 pub fn array_diff(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     let (lo, hi) = if a.len() <= b.len() { (a.len(), b.len()) } else { (b.len(), a.len()) };
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
     unsafe {
         // Balanced → shuffle-merge; skewed → the galloping broadcast-scan.
         if lo >= 8 && hi <= lo * MERGE_MAX_RATIO {
@@ -20,7 +20,7 @@ pub fn array_diff(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
         }
         return diff_neon(a, b, out);
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
     unsafe {
         if lo >= 8 && hi <= lo * MERGE_MAX_RATIO && is_x86_feature_detected!("ssse3") {
             return diff_merge_sse(a, b, out);
@@ -97,7 +97,7 @@ fn diff_scan<const W: usize>(
     k
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[target_feature(enable = "neon")]
 unsafe fn diff_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     diff_scan::<8>(a, b, out, |b, f, v| unsafe { crate::ops::simd::common::window_has_neon(b, f, v) })
@@ -138,7 +138,7 @@ fn diff_tail(
 /// spans (a value absent from one `b` block may match a later one), and `a`'s
 /// *un*-matched lanes are emitted only when `a` advances — by which point it has
 /// seen every `b` value ≤ its max. A scalar two-pointer finishes the tail.
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[target_feature(enable = "neon")]
 unsafe fn diff_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     use std::arch::aarch64::*;
@@ -206,7 +206,7 @@ unsafe fn diff_merge_neon(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
 }
 
 /// SSSE3 twin of [`diff_merge_neon`].
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "ssse3")]
 unsafe fn diff_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     use std::arch::x86_64::*;
@@ -269,13 +269,13 @@ unsafe fn diff_merge_sse(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "sse2")]
 unsafe fn diff_sse2(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     diff_scan::<8>(a, b, out, |b, f, v| unsafe { crate::ops::simd::common::window_has_sse2(b, f, v) })
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 #[target_feature(enable = "avx2")]
 unsafe fn diff_avx2(a: &[u16], b: &[u16], out: &mut [u16]) -> usize {
     diff_scan::<16>(a, b, out, |b, f, v| unsafe { crate::ops::simd::common::window_has_avx2(b, f, v) })
