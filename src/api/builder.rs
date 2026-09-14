@@ -14,6 +14,8 @@ use crate::format::*;
 pub struct FrozenBitmapBuilder {
     containers: Vec<Built>,
     cur_key: u16,
+    /// Lows of the open container. Reused across containers, so it is
+    /// allocated once (at most 64K `u16`) for the builder's lifetime.
     cur: Vec<u16>,
     have_cur: bool,
     total: u64,
@@ -56,6 +58,9 @@ impl FrozenBitmapBuilder {
                 assert!(key > self.cur_key, "values must be strictly ascending");
                 self.flush();
             }
+            // Reserve the array/bitmap break-even once; `flush` clears, not
+            // drops, so this is then a no-op. Not in `new`: empty builds stay free.
+            self.cur.reserve(ARRAY_MAX_SIZE);
             self.cur_key = key;
             self.cur.push(lo);
             self.have_cur = true;
@@ -79,7 +84,7 @@ impl FrozenBitmapBuilder {
             self.flush();
         }
         if self.total as usize <= INLINE_MAX_COUNT {
-            let (_, standard_total, ..) = layout(&self.containers);
+            let (standard_total, ..) = layout(&self.containers);
             if inline_size(self.total as usize) < standard_total {
                 return serialize_inline(&self.containers, self.total as usize);
             }
@@ -98,10 +103,10 @@ impl FrozenBitmapBuilder {
     }
 
     fn flush(&mut self) {
-        let vals = std::mem::take(&mut self.cur);
-        let built = build_container(self.cur_key, &vals);
+        let built = build_container(self.cur_key, &self.cur);
         self.total += built.card as u64;
         self.containers.push(built);
+        self.cur.clear();
     }
 }
 
@@ -114,13 +119,14 @@ impl Default for FrozenBitmapBuilder {
 /// Pick the smallest representation for one key's sorted lows and serialize it.
 fn build_container(key: u16, vals: &[u16]) -> Built {
     let card = vals.len() as u32;
-    let runs = extract_runs(vals);
+    let run_count = count_runs(vals);
 
     let array_cost = vals.len() * 2;
-    let run_cost = run_bytes(runs.len());
+    let run_cost = run_bytes(run_count);
     let bitmap_cost = BITMAP_BYTES;
 
     let (typ, payload) = if run_cost <= array_cost && run_cost <= bitmap_cost {
+        let runs = extract_runs(vals, run_count);
         let mut p = vec![0u8; run_cost];
         write_u16(&mut p, 0, runs.len() as u16);
         for (j, &(start, len)) in runs.iter().enumerate() {
@@ -154,10 +160,17 @@ fn build_container(key: u16, vals: &[u16]) -> Built {
     }
 }
 
+/// Number of maximal runs of consecutive values in sorted, deduped `vals`.
+fn count_runs(vals: &[u16]) -> usize {
+    let pairs = vals.iter().zip(vals.iter().skip(1));
+    usize::from(!vals.is_empty()) + pairs.filter(|(&a, &b)| b != a + 1).count()
+}
+
 /// Run-length encode sorted, deduped lows into `(start, length)` pairs, where a
-/// pair covers the inclusive range `[start, start + length]`.
-fn extract_runs(vals: &[u16]) -> Vec<(u16, u16)> {
-    let mut runs = Vec::new();
+/// pair covers the inclusive range `[start, start + length]`. `run_count` must
+/// be [`count_runs`] of `vals`, so the result is allocated once at exact size.
+fn extract_runs(vals: &[u16], run_count: usize) -> Vec<(u16, u16)> {
+    let mut runs = Vec::with_capacity(run_count);
     let mut start = vals[0];
     let mut prev = vals[0];
     for &v in &vals[1..] {
@@ -173,27 +186,25 @@ fn extract_runs(vals: &[u16]) -> Vec<(u16, u16)> {
     runs
 }
 
-/// Standard-layout plan: per-container payload offsets (bitmaps 64-aligned,
-/// the rest 2-aligned), total size, and flags.
-fn layout(containers: &[Built]) -> (Vec<u32>, usize, bool, bool) {
+/// Standard-layout plan: total size and flags (bitmaps 64-aligned, the rest
+/// 2-aligned). `serialize_standard` repeats the walk for the offsets, so nothing
+/// here is allocated.
+fn layout(containers: &[Built]) -> (usize, bool, bool) {
     let has_runs = containers.iter().any(|c| c.typ == CT_RUN);
     let has_bitmap = containers.iter().any(|c| c.typ == CT_BITMAP);
-    let mut offsets = Vec::with_capacity(containers.len());
     let mut cursor = 0usize;
     for c in containers {
         let align = if c.typ == CT_BITMAP { BUF_ALIGN } else { 2 };
-        cursor = align_up(cursor, align);
-        offsets.push(cursor as u32);
-        cursor += c.payload.len();
+        cursor = align_up(cursor, align) + c.payload.len();
     }
     let total = data_section_off(containers.len(), has_bitmap) + cursor;
-    (offsets, total, has_runs, has_bitmap)
+    (total, has_runs, has_bitmap)
 }
 
 /// Lay out header + SoA index + data section into a 64-aligned buffer.
 fn serialize_standard(containers: &[Built], total_card: u64) -> FrozenBitmap {
     let n = containers.len();
-    let (offsets, total, has_runs, has_bitmap) = layout(containers);
+    let (total, has_runs, has_bitmap) = layout(containers);
     let data_base = data_section_off(n, has_bitmap);
 
     let mut buf = result_buf(total);
@@ -207,7 +218,10 @@ fn serialize_standard(containers: &[Built], total_card: u64) -> FrozenBitmap {
     }
     .write(&mut buf);
 
+    let mut cursor = 0usize;
     for (i, c) in containers.iter().enumerate() {
+        let align = if c.typ == CT_BITMAP { BUF_ALIGN } else { 2 };
+        cursor = align_up(cursor, align);
         write_index_entry(
             &mut buf,
             n,
@@ -216,14 +230,12 @@ fn serialize_standard(containers: &[Built], total_card: u64) -> FrozenBitmap {
                 key: c.key,
                 typ: c.typ,
                 cardinality: c.card,
-                data_offset: offsets[i],
+                data_offset: cursor as u32,
             },
         );
-    }
-
-    for (i, c) in containers.iter().enumerate() {
-        let start = data_base + offsets[i] as usize;
+        let start = data_base + cursor;
         buf[start..start + c.payload.len()].copy_from_slice(&c.payload);
+        cursor += c.payload.len();
     }
 
     FrozenBitmap::from_buf(buf)

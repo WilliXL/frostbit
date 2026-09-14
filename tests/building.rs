@@ -240,3 +240,37 @@ fn compact_inline_expands_all_container_types() {
     assert_eq!(v.min(), Some(0));
     assert_eq!(v.max(), Some(262_144));
 }
+
+// --- Wire bytes pinned by digest ---------------------------------------------
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
+        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Every representation and finish path, pinned by digest so the wire format
+/// cannot drift. Recorded before the builder reused its accumulator.
+#[test]
+fn serialized_bytes_are_pinned() {
+    fn pin(name: &str, ids: impl IntoIterator<Item = u32>, digest: u64) {
+        let bm = build(&ids.into_iter().collect::<Vec<_>>());
+        assert_eq!(fnv1a(bm.as_bytes()), digest, "{name}");
+    }
+    pin("inline", [7, 70_000, u32::MAX], 0xaa0b_d3fe_829c_d44a);
+    pin("array", (0..9000).step_by(3), 0xfb80_c64d_7adf_00c3);
+    pin("bitmap", (0..60_000).step_by(2), 0xc620_c566_08ca_d07b);
+    pin("run", 0..5000, 0x3c84_dd02_33c3_c719);
+    pin(
+        "mixed",
+        (0..0x1_0000)
+            .step_by(2)
+            .chain(0x1_0000..0x1_2000)
+            .chain((0x2_0000..0x2_6000).step_by(3))
+            .chain((0x3_0000..0x3_1000).step_by(3))
+            .chain([0x5_0000, 0x5_0001, 0x7_FFFF, u32::MAX]),
+        0x040c_ef52_e01d_4bd3,
+    );
+    let digest = fnv1a(build_std(&[0, 65_536, 131_072, 196_608]).as_bytes());
+    assert_eq!(digest, 0xd8e6_0b51_ab91_cb3d, "finish_standard");
+}
