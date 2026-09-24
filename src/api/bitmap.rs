@@ -87,7 +87,7 @@ impl Drop for FrozenBitmap {
 impl FrozenBitmap {
     /// The empty frozen bitmap.
     pub fn empty() -> Self {
-        crate::FrozenBitmapBuilder::new().finish()
+        crate::api::builder::empty()
     }
 
     /// Validate and copy frozen-bitmap `bytes` into a 64-byte-aligned buffer.

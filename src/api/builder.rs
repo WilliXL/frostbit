@@ -1,6 +1,7 @@
 //! Builds a frozen bitmap from values pushed in strictly ascending order.
 
 use crate::api::bitmap::{result_buf, FrozenBitmap};
+use crate::container::{Bitmap, Data, Run};
 use crate::format::*;
 
 /// Accumulates ascending `u32`s, then serializes to a [`FrozenBitmap`].
@@ -25,16 +26,67 @@ struct Built {
     key: u16,
     typ: u8,
     card: u32,
-    payload: Vec<u8>,
+    data: ContainerData,
+}
+
+/// A finished container in its winning representation: the owned counterpart of
+/// [`Data`], held until `finish` writes it into the output.
+enum ContainerData {
+    Array(Vec<u16>),
+    Bitmap(Box<Bitmap>),
+    Run(Vec<Run>),
+}
+
+impl ContainerData {
+    /// Borrow as the typed view the kernels read.
+    fn view(&self) -> Data<'_> {
+        match self {
+            ContainerData::Array(vals) => Data::Array(vals),
+            ContainerData::Bitmap(words) => Data::Bitmap(words),
+            ContainerData::Run(runs) => Data::Run(runs),
+        }
+    }
+
+    /// Serialized payload size.
+    fn byte_len(&self) -> usize {
+        match self {
+            ContainerData::Array(vals) => vals.len() * 2,
+            ContainerData::Bitmap(_) => BITMAP_BYTES,
+            ContainerData::Run(runs) => run_bytes(runs.len()),
+        }
+    }
+
+    /// Write the payload into `dst`, exactly `byte_len` bytes.
+    fn write(&self, dst: &mut [u8]) {
+        match self {
+            ContainerData::Array(vals) => {
+                for (j, &v) in vals.iter().enumerate() {
+                    write_u16(dst, j * 2, v);
+                }
+            }
+            ContainerData::Bitmap(words) => {
+                for (j, &w) in words.iter().enumerate() {
+                    write_u64(dst, j * 8, w);
+                }
+            }
+            ContainerData::Run(runs) => {
+                write_u16(dst, 0, runs.len() as u16);
+                for (j, r) in runs.iter().enumerate() {
+                    write_u16(dst, 2 + j * 4, r.start);
+                    write_u16(dst, 2 + j * 4 + 2, r.len);
+                }
+            }
+        }
+    }
 }
 
 impl FrozenBitmapBuilder {
-    /// A new, empty builder.
+    /// A new, empty builder. Reserves the array/bitmap break-even up front.
     pub fn new() -> Self {
         Self {
             containers: Vec::new(),
             cur_key: 0,
-            cur: Vec::new(),
+            cur: Vec::with_capacity(ARRAY_MAX_SIZE),
             have_cur: false,
             total: 0,
         }
@@ -58,9 +110,6 @@ impl FrozenBitmapBuilder {
                 assert!(key > self.cur_key, "values must be strictly ascending");
                 self.flush();
             }
-            // Reserve the array/bitmap break-even once; `flush` clears, not
-            // drops, so this is then a no-op. Not in `new`: empty builds stay free.
-            self.cur.reserve(ARRAY_MAX_SIZE);
             self.cur_key = key;
             self.cur.push(lo);
             self.have_cur = true;
@@ -116,7 +165,13 @@ impl Default for FrozenBitmapBuilder {
     }
 }
 
-/// Pick the smallest representation for one key's sorted lows and serialize it.
+/// The empty bitmap, without constructing a builder: what `finish` yields for one
+/// that was never pushed to, minus the eagerly reserved accumulator.
+pub(crate) fn empty() -> FrozenBitmap {
+    serialize_inline(&[], 0)
+}
+
+/// Pick the smallest representation for one key's sorted lows.
 fn build_container(key: u16, vals: &[u16]) -> Built {
     let card = vals.len() as u32;
     let run_count = count_runs(vals);
@@ -125,38 +180,23 @@ fn build_container(key: u16, vals: &[u16]) -> Built {
     let run_cost = run_bytes(run_count);
     let bitmap_cost = BITMAP_BYTES;
 
-    let (typ, payload) = if run_cost <= array_cost && run_cost <= bitmap_cost {
-        let runs = extract_runs(vals, run_count);
-        let mut p = vec![0u8; run_cost];
-        write_u16(&mut p, 0, runs.len() as u16);
-        for (j, &(start, len)) in runs.iter().enumerate() {
-            write_u16(&mut p, 2 + j * 4, start);
-            write_u16(&mut p, 2 + j * 4 + 2, len);
-        }
-        (CT_RUN, p)
+    let (typ, data) = if run_cost <= array_cost && run_cost <= bitmap_cost {
+        (CT_RUN, ContainerData::Run(extract_runs(vals, run_count)))
     } else if array_cost <= bitmap_cost {
-        let mut p = vec![0u8; array_cost];
-        for (j, &v) in vals.iter().enumerate() {
-            write_u16(&mut p, j * 2, v);
-        }
-        (CT_ARRAY, p)
+        (CT_ARRAY, ContainerData::Array(vals.to_vec()))
     } else {
-        let mut words = [0u64; BITMAP_WORDS];
+        let mut words = Box::new([0u64; BITMAP_WORDS]);
         for &v in vals {
             words[v as usize / 64] |= 1u64 << (v as usize % 64);
         }
-        let mut p = vec![0u8; BITMAP_BYTES];
-        for (j, &w) in words.iter().enumerate() {
-            write_u64(&mut p, j * 8, w);
-        }
-        (CT_BITMAP, p)
+        (CT_BITMAP, ContainerData::Bitmap(words))
     };
 
     Built {
         key,
         typ,
         card,
-        payload,
+        data,
     }
 }
 
@@ -166,10 +206,10 @@ fn count_runs(vals: &[u16]) -> usize {
     usize::from(!vals.is_empty()) + pairs.filter(|(&a, &b)| b != a + 1).count()
 }
 
-/// Run-length encode sorted, deduped lows into `(start, length)` pairs, where a
-/// pair covers the inclusive range `[start, start + length]`. `run_count` must
-/// be [`count_runs`] of `vals`, so the result is allocated once at exact size.
-fn extract_runs(vals: &[u16], run_count: usize) -> Vec<(u16, u16)> {
+/// Run-length encode sorted, deduped lows into runs covering the inclusive
+/// range `[start, start + len]`. `run_count` must be [`count_runs`] of `vals`,
+/// so the result is allocated once at exact size.
+fn extract_runs(vals: &[u16], run_count: usize) -> Vec<Run> {
     let mut runs = Vec::with_capacity(run_count);
     let mut start = vals[0];
     let mut prev = vals[0];
@@ -177,12 +217,14 @@ fn extract_runs(vals: &[u16], run_count: usize) -> Vec<(u16, u16)> {
         if v == prev + 1 {
             prev = v;
         } else {
-            runs.push((start, prev - start));
+            let len = prev - start;
+            runs.push(Run { start, len });
             start = v;
             prev = v;
         }
     }
-    runs.push((start, prev - start));
+    let len = prev - start;
+    runs.push(Run { start, len });
     runs
 }
 
@@ -195,7 +237,7 @@ fn layout(containers: &[Built]) -> (usize, bool, bool) {
     let mut cursor = 0usize;
     for c in containers {
         let align = if c.typ == CT_BITMAP { BUF_ALIGN } else { 2 };
-        cursor = align_up(cursor, align) + c.payload.len();
+        cursor = align_up(cursor, align) + c.data.byte_len();
     }
     let total = data_section_off(containers.len(), has_bitmap) + cursor;
     (total, has_runs, has_bitmap)
@@ -234,8 +276,9 @@ fn serialize_standard(containers: &[Built], total_card: u64) -> FrozenBitmap {
             },
         );
         let start = data_base + cursor;
-        buf[start..start + c.payload.len()].copy_from_slice(&c.payload);
-        cursor += c.payload.len();
+        let len = c.data.byte_len();
+        c.data.write(&mut buf[start..start + len]);
+        cursor += len;
     }
 
     FrozenBitmap::from_buf(buf)
@@ -253,36 +296,10 @@ fn serialize_inline(containers: &[Built], count: usize) -> FrozenBitmap {
     let mut off = INLINE_HEADER_SIZE;
     for c in containers {
         let hi = (c.key as u32) << 16;
-        match c.typ {
-            CT_ARRAY => {
-                for j in 0..c.card as usize {
-                    write_u32(&mut buf, off, hi | read_u16(&c.payload, j * 2) as u32);
-                    off += 4;
-                }
-            }
-            CT_RUN => {
-                let nr = read_u16(&c.payload, 0) as usize;
-                for r in 0..nr {
-                    let s = read_u16(&c.payload, 2 + r * 4) as u32;
-                    let e = s + read_u16(&c.payload, 2 + r * 4 + 2) as u32;
-                    for v in s..=e {
-                        write_u32(&mut buf, off, hi | v);
-                        off += 4;
-                    }
-                }
-            }
-            _ => {
-                for w in 0..BITMAP_WORDS {
-                    let mut word = read_u64(&c.payload, w * 8);
-                    while word != 0 {
-                        let tz = word.trailing_zeros() as usize;
-                        write_u32(&mut buf, off, hi | (w * 64 + tz) as u32);
-                        word &= word - 1;
-                        off += 4;
-                    }
-                }
-            }
-        }
+        c.data.view().for_each(|lo| {
+            write_u32(&mut buf, off, hi | lo as u32);
+            off += 4;
+        });
     }
     debug_assert_eq!(off, INLINE_HEADER_SIZE + 4 * count);
 
