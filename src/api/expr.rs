@@ -22,7 +22,7 @@ use crate::ops::kernels;
 use crate::ops::analyze::plan::{plan_union_observed, recycle, Op as PlanOp, Plan};
 use crate::ops::analyze::shape::{self, union_shape_agg, view_shape, Shape};
 use crate::ops::source::{view_container_count, Inputs};
-use crate::{FrozenBitmap, FrozenBitmapBuilder, FrozenBitmapView};
+use crate::{FrozenBitmap, FrozenBitmapView};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Op {
@@ -348,7 +348,7 @@ impl<'a> FoldPlan<'a> {
         match stack.pop().expect("non-empty plan") {
             Acc::Arena(a) => a.serialize_compact(),
             Acc::Leaf(v) => FrozenBitmap::from_bytes_trusted(v.as_bytes()),
-            Acc::Empty => FrozenBitmapBuilder::new().finish(),
+            Acc::Empty => FrozenBitmap::empty(),
         }
     }
 }

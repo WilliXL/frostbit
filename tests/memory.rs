@@ -158,3 +158,80 @@ fn warm_materialize_does_not_allocate() {
     });
     assert_eq!(n, 0, "warm materialize allocated {n} times");
 }
+
+/// One allocation per finished container (its payload; a run container's run
+/// list too) plus a few builder-wide buffers — nothing per pushed value.
+#[test]
+fn builder_allocates_per_container_not_per_value() {
+    // 16 array, 8 bitmap and 8 run containers: 40 payloads.
+    let mut values = Vec::new();
+    for k in 0..16u32 {
+        values.extend((0..300).map(|i| (k << 16) | (i * 200)));
+    }
+    for k in 16..24u32 {
+        values.extend((0..12_000).map(|i| (k << 16) | (i * 5)));
+    }
+    for k in 24..32u32 {
+        values.extend((k << 16)..(k << 16) + 4000);
+    }
+    let before = allocs();
+    let _ = build(&values);
+    let n = allocs() - before;
+    assert!(n <= 40 + 16, "32 containers allocated {n} times");
+}
+
+/// `materialize` returns an empty tree through the empty build, so it must
+/// stay on the pooled path: the accumulator is reserved on the first push.
+#[test]
+fn warm_empty_build_does_not_allocate() {
+    let n = allocs_when_warm(2, || {
+        std::hint::black_box(FrozenBitmap::empty());
+    });
+    assert_eq!(n, 0, "warm empty build allocated {n} times");
+}
+
+/// `new` reserves the accumulator once, sized to the array/bitmap break-even, so
+/// filling one container up to that size never grows it.
+#[test]
+fn builder_reserves_accumulator_up_front() {
+    let before = allocs();
+    let mut b = FrozenBitmapBuilder::new();
+    assert_eq!(allocs() - before, 1, "new() must reserve the accumulator");
+    let before = allocs();
+    b.extend_sorted((0..4096).map(|i| i * 16));
+    assert_eq!(
+        allocs() - before,
+        0,
+        "accumulator grew below the break-even"
+    );
+}
+
+/// A run container costs one allocation: its run list is its payload.
+#[test]
+fn run_containers_allocate_once() {
+    let values: Vec<u32> = (0..32u32)
+        .flat_map(|k| (k << 16)..(k << 16) + 4000)
+        .collect();
+    let before = allocs();
+    let _ = build(&values);
+    let n = allocs() - before;
+    assert!(n <= 32 + 16, "32 run containers allocated {n} times");
+}
+
+/// An expression that folds to nothing must not construct a builder, whose
+/// accumulator is reserved in `new`: an empty result stays allocation-free.
+#[test]
+fn warm_empty_materialize_does_not_allocate() {
+    let x = build(&[1, 2, 3]);
+    let big = build(&(0..5000).collect::<Vec<_>>());
+    // diff(x, x) is empty, so the AND's guard short-circuits to an empty result.
+    let expr = BitmapExpr::and([
+        BitmapExpr::difference(BitmapExpr::leaf(x.view()), BitmapExpr::leaf(x.view())),
+        BitmapExpr::leaf(big.view()),
+    ]);
+    let n = allocs_when_warm(24, || {
+        std::hint::black_box(expr.materialize());
+    });
+    assert_eq!(n, 0, "warm empty materialize allocated {n} times");
+    assert_eq!(expr.materialize().as_bytes(), build(&[]).as_bytes());
+}
